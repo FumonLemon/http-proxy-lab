@@ -1,0 +1,33 @@
+name: ci
+
+# 两个平台编同一份源码、跑同一套自测：macos-latest（本机同款 clang）与 windows-latest（真实 MSVC）。
+# CI 只能验证"能编 + 协议逻辑对"；浏览器里的真实效果只能在 Windows 机器上人工看（见 plan.md 第 6 节）。
+on: [push, pull_request]
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: mac 侧（clang + make）
+        if: runner.os == 'macOS'
+        run: make check
+
+      - name: Windows 侧（进入 MSVC 环境）
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Windows 侧编译并跑自测
+        if: runner.os == 'Windows'
+        run: |
+          cl /W4 /std:c11 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
+          .\selftest.exe
+
+      - name: Windows 侧编出正式程序（证明能产出 exe）
+        if: runner.os == 'Windows'
+        run: cl /W4 /std:c11 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib

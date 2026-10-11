@@ -1,0 +1,12 @@
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.dSYM/
+proxy
+selftest
+selftest_*
+build/
+*.log
+.DS_Store
