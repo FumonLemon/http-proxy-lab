@@ -24,10 +24,32 @@ jobs:
 
       - name: Windows 侧编译并跑自测
         if: runner.os == 'Windows'
+        shell: pwsh
+        # 把编译/自测的报错顶成 annotation：Actions 日志页要登录才能看，annotation 走公开 API 就能读
         run: |
-          cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
-          .\selftest.exe
+          $out = cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib 2>&1
+          $out | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            $out | Where-Object { $_ -match ': (error|warning) ' } | Select-Object -First 20 |
+              ForEach-Object { Write-Host "::error::$($_.ToString().Trim())" }
+            exit 1
+          }
+          $t = .\selftest.exe 2>&1
+          $t | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            $t | Where-Object { $_ -match 'FAIL' } | Select-Object -First 20 |
+              ForEach-Object { Write-Host "::error::$($_.ToString().Trim())" }
+            exit 1
+          }
 
       - name: Windows 侧编出正式程序（证明能产出 exe）
         if: runner.os == 'Windows'
-        run: cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib
+        shell: pwsh
+        run: |
+          $out = cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib 2>&1
+          $out | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            $out | Where-Object { $_ -match ': (error|warning) ' } | Select-Object -First 20 |
+              ForEach-Object { Write-Host "::error::$($_.ToString().Trim())" }
+            exit 1
+          }
