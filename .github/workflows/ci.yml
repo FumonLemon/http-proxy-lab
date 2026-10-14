@@ -25,9 +25,9 @@ jobs:
       - name: Windows 侧编译并跑自测
         if: runner.os == 'Windows'
         run: |
-          cl /W4 /std:c11 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
+          cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
           .\selftest.exe
 
       - name: Windows 侧编出正式程序（证明能产出 exe）
         if: runner.os == 'Windows'
-        run: cl /W4 /std:c11 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib
+        run: cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib

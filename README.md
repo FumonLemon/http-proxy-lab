@@ -21,10 +21,13 @@ make clean
 MSVC（在仓库根目录、已进入 VS 开发者命令行）：
 
 ```
-cl /W4 /std:c11 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib
-cl /W4 /std:c11 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
+cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib
+cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
 selftest.exe
 ```
+
+`/utf-8` 不能省：源码是 UTF-8，里面有中文注释、中文日志和自制页面，MSVC 默认按系统 ANSI 代码页读源文件，
+中文串会被拆错字节（在中文 Windows 上尤其明显）。
 
 不使用任何第三方库；Windows 侧只多链接系统的 `ws2_32.lib`。
 
