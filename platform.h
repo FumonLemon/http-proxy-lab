@@ -21,6 +21,8 @@
   typedef int              sock_len_t;
   typedef HANDLE           thread_t;
   typedef CRITICAL_SECTION mutex_t;
+  /* 线程函数指针类型：写成 typedef 而不是把调用约定宏塞进参数表（MSVC 的 C 解析器认不了后者） */
+  typedef unsigned (__stdcall *thread_fn_t)(void *);
 
   #define SOCK_INVALID    INVALID_SOCKET
   #define sock_close(s)   closesocket(s)
@@ -63,7 +65,7 @@
       return err;                      /* 0 = 连接成功 */
   }
 
-  static inline int thread_start(thread_t *t, THREAD_FN((*fn)), void *arg) {
+  static inline int thread_start(thread_t *t, thread_fn_t fn, void *arg) {
       *t = (HANDLE)_beginthreadex(NULL, 0, fn, arg, 0, NULL);   /* 失败返回 NULL */
       return *t ? 0 : -1;
   }
@@ -82,6 +84,7 @@
   typedef socklen_t       sock_len_t;
   typedef pthread_t       thread_t;
   typedef pthread_mutex_t mutex_t;
+  typedef void *(*thread_fn_t)(void *);
 
   #define SOCK_INVALID    (-1)
   #define sock_close(s)   close(s)
@@ -135,7 +138,7 @@
       return err;                      /* 0 = 连接成功 */
   }
 
-  static inline int thread_start(thread_t *t, THREAD_FN((*fn)), void *arg) {
+  static inline int thread_start(thread_t *t, thread_fn_t fn, void *arg) {
       return pthread_create(t, NULL, fn, arg);
   }
   /* 不 join 也不留僵尸：detach 掉，线程退出时资源自动回收 */
