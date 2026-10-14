@@ -42,7 +42,7 @@ jobs:
             exit 1
           }
 
-      - name: Windows 侧编出正式程序（证明能产出 exe）
+      - name: Windows 侧编出正式程序 + 记录编译器事实
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -53,3 +53,5 @@ jobs:
               ForEach-Object { Write-Host "::error::$($_.ToString().Trim())" }
             exit 1
           }
+          # 报告"实验环境"要用：把 CI 上的 MSVC 版本顶到 notice 里（日志页要登录，annotation 公开可读）
+          (cl 2>&1 | Select-Object -First 1) | ForEach-Object { Write-Host "::notice::CI 编译器: $_" }
