@@ -1,5 +1,7 @@
 # 计算机网络实验一：手搓 HTTP 代理服务器
 
+[![ci](https://github.com/FumonLemon/http-proxy-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/FumonLemon/http-proxy-lab/actions/workflows/ci.yml)
+
 一个 C 程序：主线程在端口上 accept，每来一个连接开一个线程；线程把浏览器发来的**绝对形式**请求
 解析成"主机 + 路径"，连原服务器、改写成 origin-form 转发出去，再把响应边收边转发；响应可缓存就顺手
 存进内存表，下次命中先发 `If-Modified-Since` 问原服务器（304 就用缓存应答）。链路上还插了网站过滤、
@@ -51,7 +53,8 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 ## 进度
 
 - [x] A 骨架（platform.h + net + http + proxy + Makefile + 自测起步）
-- [x] A2 CI 配置已写（`.github/workflows/ci.yml`），**尚未推送**，所以还没跑过真实 runner
+- [x] A2 仓库与 CI：https://github.com/FumonLemon/http-proxy-lab （Public），两个 job 全绿
+      （macos-latest `make check`；windows-latest MSVC 编 `selftest.exe` 并跑通、另出 `proxy.exe`）
 - [x] B 多线程 + 线程上限 + 大响应/慢响应/引导
 - [x] C 缓存（If-Modified-Since + 304 + 淘汰）
 - [x] D 三个扩展功能 + 开关对照
@@ -61,7 +64,16 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 自测当前状态：`make check` → `PASS 8/8`，`make asan` → `PASS 8/8`，
 `-Wall -Wextra -Wpedantic -Wconversion` 零警告（含各开关组合）。
 
-## 实测踩到的两个真问题（写报告可以直接引用）
+CI 实测记录（报告"实验环境"可直接引用）：
+
+```
+CI 编译器（windows-latest）：Microsoft (R) C/C++ Optimizing Compiler Version 19.51.36260 for x64
+CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
+        （/W4 下零警告，selftest.exe 退出码 0，proxy.exe 产出成功）
+本机编译器（macos-latest 同款）：Apple clang 16.0.0，make check 通过
+```
+
+## 实测踩到的四个真问题（写报告可以直接引用）
 
 1. **一个地址被黑洞时会死等。** 首次实跑 `http://neverssl.com/`（本实验的经典纯 http 靶子）时，
    代理卡死、curl 15 秒拿不到任何字节。查明：该域名同时有 A 与 AAAA 记录，从本网络看
@@ -71,6 +83,14 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 2. **POST 的请求体可能和头部在同一次 `recv` 里到达。** 若只按 `Content-Length` 去 socket 上再读，
    代理会等一段已经收下的字节而挂死（自测 T1 一加 POST 断言就当场挂住）。现在先转发"跟着头部一起
    收到的那一截"，再读剩余的（`proxy.c` 第 10 步）。
+3. **MSVC 默认按系统 ANSI 代码页读源码，中文会把引号吃掉。** 源码是 UTF-8 且含中文注释/中文页面，
+   Windows 首次编译直接报语法错误（本地按 GBK 模拟解读，40 处引号被前一个汉字的尾巴字节配对吃掉）。
+   修法：`cl` 加 `/utf-8`（同时定下源码与执行字符集）。
+4. **MSVC 的 C 解析器不接受把调用约定宏塞进函数参数表。** `static inline int thread_start(thread_t *,
+   THREAD_FN((*fn)), void *)` 在 MSVC 下报 `C2061/C2146/C2059`；改成
+   `typedef unsigned (__stdcall *thread_fn_t)(void *)` 再写成普通参数即可，两平台共用。
+
+前两个是平台无关的运行期 bug（自测与真实流量抓到），后两个只在 MSVC 上出现（CI 的 windows-latest 抓到）。
 
 ## 已知局限（都写进报告的"局限"）
 
