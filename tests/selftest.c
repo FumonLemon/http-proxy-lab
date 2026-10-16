@@ -336,15 +336,33 @@ static void t6_user_filter(void) {
     finish("T6 用户过滤（单机注入判据）");
 }
 
-/* T7 网站引导：被引导的域名拿到 302 + Location（目标来自名单，原来是回一张写死的自制页） */
+/* T7 网站引导：两种落地方式都要验 —— 目标写网址 → 302；目标写 self:路径 → 直接回那个文件 */
 static void t7_redirect(void) {
     int n0 = origin_conns();
     int b = proxy_get("http://guide.test/anything", buf2, sizeof buf2);
     int n1 = origin_conns();
-    expect(b > 0 && strstr(buf2, "302") != NULL, "引导域名 → 302");
+    expect(b > 0 && strstr(buf2, "302") != NULL, "引导域名（默认名单）→ 302");
     expect(b > 0 && strstr(buf2, "Location: http://example.com/") != NULL, "302 带上了名单里的目标网址");
     expect(n1 == n0, "没有连原服务器（引导在连原服务器之前完成）");
-    finish("T7 网站引导（302 跳转）");
+
+    /* self:目标 —— 换一份名单文件，让它直接回自制页面（地址栏保持原域名） */
+    {
+        FILE *f = fopen("selftest_page.html", "wb");
+        if (f) { fputs("<html><body>SELFTEST-FAKE-PAGE</body></html>", f); fclose(f); }
+        f = fopen("selftest_guide.txt", "wb");
+        if (f) { fputs("[redirect]\nguide.test    self:selftest_page.html\n", f); fclose(f); }
+
+        rules_init("selftest_guide.txt");
+        b = proxy_get("http://guide.test/anything", buf2, sizeof buf2);
+        expect(b > 0 && strstr(buf2, "200 OK") != NULL && strstr(buf2, "SELFTEST-FAKE-PAGE") != NULL,
+               "self: 目标 → 直接回自制页面（200 + 页面内容）");
+        expect(b > 0 && strstr(buf2, "Location:") == NULL, "self: 目标不发 302（地址栏保持原域名）");
+
+        remove("selftest_page.html");
+        remove("selftest_guide.txt");
+        rules_init(NULL);                 /* 还原内置默认名单 */
+    }
+    finish("T7 网站引导（302 与 self: 自制页）");
 }
 
 /* T8 解析与畸形输入：解析断言 + 400/502 + 进程存活 */

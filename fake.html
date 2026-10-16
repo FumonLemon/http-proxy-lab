@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>实验一 · 网站引导演示页</title>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 3rem auto; max-width: 46rem; line-height: 1.7; color: #222; }
+  h1 { font-size: 1.6rem; }
+  .tip { background: #fff8e1; border-left: 4px solid #e6a700; padding: .8rem 1rem; }
+  code { background: #f2f2f2; padding: .1rem .3rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>实验一：网站引导（模拟网站）</h1>
+<p>你现在看到的是<strong>代理服务器自己造出来的页面</strong>，没有访问真正的 <code>guide.test</code>。</p>
+<p class="tip">
+  检验方法：浏览器地址栏仍然是 <code>http://guide.test/…</code>，但页面内容是这里写的；
+  换个域名访问会得到真页面，而名单里的域名永远只拿到这一页。
+</p>
+<ul>
+  <li>这一页来自代理工作目录下的 <code>fake.html</code>，改完存盘、刷新浏览器就生效。</li>
+  <li>名单里那一行的写法是：<code>guide.test    self:fake.html</code>。</li>
+  <li>如果写成网址（<code>http://…</code>），代理会回 302 跳过去，地址栏就跟着变了。</li>
+</ul>
+<p>—— 本页由代理服务器直接生成（实验内容第 3 条 c 项：网站引导/钓鱼）。</p>
+</body>
+</html>

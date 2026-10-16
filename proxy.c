@@ -100,9 +100,14 @@ static void send_page(socket_t c, int code, const char *reason, const char *body
     if (n > 0 && (size_t)n < sizeof buf) net_send_full(c, buf, (size_t)n);
 }
 
-/* 网站引导命中时回 302 + Location（实验内容 c 项；目标网址来自 rules.txt 的 [redirect]）。
-   失败行为：发不出去就算了，调用方照常收尾。
-   注意 302 不带体，Content-Length: 0，所以客户端不需要等数据。 */
+/* ---- 网站引导的两种落地方式（目标写在 rules.txt 的 [redirect] 里）----
+   目标以 http:// 开头   → 302 + Location 跳过去，但浏览器地址栏会变成目标网址；
+   目标写成 self:路径   → 代理直接把这个文件当页面回给客户端，地址栏仍是原域名
+                          （实验里"引导到模拟网站/钓鱼"要的就是这个效果，且改文件即生效）。
+   两个函数只在 ENABLE_REDIRECT 下存在，免得开关全关时被 -Wunused-function 报。 */
+#if ENABLE_REDIRECT
+
+/* 302：不带体，Content-Length: 0。失败行为：发不出去就算了，调用方照常收尾。 */
 static void send_redirect(socket_t c, const char *url) {
     char buf[1024];
     int n = snprintf(buf, sizeof buf,
@@ -112,6 +117,38 @@ static void send_redirect(socket_t c, const char *url) {
                      "Connection: close\r\n\r\n", url);
     if (n > 0 && (size_t)n < sizeof buf) net_send_full(c, buf, (size_t)n);
 }
+
+/* self:目标 —— 把本地文件当页面回给客户端。每次请求现读，所以改那个文件立即生效
+   （跟名单一个道理）。成功返回发出的页面字节数；文件读不到 / 超过 256 KB / 发失败返回 0。 */
+static int send_local_file(socket_t c, const char *path) {
+    const size_t cap = 256u * 1024u;
+    FILE  *f;
+    char  *buf;
+    size_t got;
+    int    sent = 0;
+
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    buf = malloc(cap);
+    if (!buf) { fclose(f); return 0; }
+    got = fread(buf, 1, cap, f);
+    fclose(f);
+    if (got > 0 && got < cap) {
+        char head[256];
+        int h = snprintf(head, sizeof head,
+                         "HTTP/1.1 200 OK\r\n"
+                         "Content-Type: text/html; charset=utf-8\r\n"
+                         "Content-Length: %u\r\n"
+                         "Connection: close\r\n\r\n", (unsigned)got);
+        if (h > 0 && (size_t)h < sizeof head &&
+            net_send_full(c, head, (size_t)h) == 0 &&
+            net_send_full(c, buf, got) == 0) sent = (int)got;
+    }
+    free(buf);
+    return sent;
+}
+
+#endif /* ENABLE_REDIRECT */
 
 /* 日志一行到 stderr（协议数据只走 socket，日志绝不许混进客户端字节流）。
    字段固定：时间 客户端IP:端口 请求行 目标host:端口 状态码 转发字节数 缓存标记 */
@@ -212,11 +249,22 @@ static void handle_conn(socket_t c) {
     }
 #endif
 
-    /* 6. 网站引导：命中名单就 302 跳到名单里写的目标网址 */
+    /* 6. 网站引导：目标写网址就 302 跳过去；写 self:路径就直接回那个文件（地址栏不变） */
 #if ENABLE_REDIRECT
     {
         char dst[1024];
         if (rules_redirect_target(r.host, dst, sizeof dst)) {
+            if (strncmp(dst, "self:", 5) == 0) {
+                fwd_bytes = send_local_file(c, dst + 5);
+                if (fwd_bytes > 0) {
+                    status = 200; strcpy(tag, "网站引导(自制页)");
+                } else {
+                    fwd_bytes = 0;
+                    send_page(c, 502, "Bad Gateway", BODY_502);   /* 引导页文件读不到就如实回 502 */
+                    status = 502; strcpy(tag, "引导页读不到");
+                }
+                goto done;
+            }
             send_redirect(c, dst);
             status = 302; strcpy(tag, "网站引导");
             goto done;
