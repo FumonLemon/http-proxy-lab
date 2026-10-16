@@ -20,4 +20,10 @@ int net_send_full(socket_t s, const void *buf, size_t len);
 /* 取对端 IP 字符串（网站/用户过滤与日志用）：0 = 成功，-1 = 失败 */
 int net_peer_ip(socket_t s, char *out, size_t cap);
 
+/* 收尾：先把对端还没被读走的字节排空，再让调用方关连接。
+   为什么必须这么做：拒绝类响应（用户过滤 403、并发上限 503）是在"请求一个字节都没读"时回话的，
+   带着未读数据直接 close，系统会发 RST，对方连那条响应都收不到（实测 WinError 10053，见 plan 第 4 节）。
+   内部先 shutdown(写) 发 FIN，再带超时地读丢弃；timeout_ms 兜住恶意客户端。 */
+void net_close_gracefully(socket_t s, int timeout_ms);
+
 #endif /* NET_H */

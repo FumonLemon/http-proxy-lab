@@ -1,12 +1,14 @@
 /* proxy.c —— 代理主程序：主线程 accept，每来一个连接开一个 worker 线程。
    一次请求的完整时序就是 plan.md 第 1.2 节那张图，一行不差。
    三个扩展功能（网站过滤 / 用户过滤 / 网站引导）在这条链路的两处各插一道判断。
+   三张名单不再写死在本文件里：来自 rules.txt，存盘即生效（rules.h / rules.c）。
    源代码注释按报告第 6 项要求写足：每个函数写清做什么、参数、返回、失败行为。 */
 
 #include "platform.h"
 #include "net.h"
 #include "http.h"
 #include "cache.h"
+#include "rules.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,16 +30,9 @@
 #define ENABLE_REDIRECT 1
 #endif
 
-/* ---- 三张名单：硬编码在文件顶部，值不会变就不做配置文件（plan 第 3.5 节） ---- */
-#if ENABLE_SITE_FILTER
-static const char *SITE_BLACKLIST[] = { "127.0.0.1", NULL };   /* 网站过滤：名单内主机不连，直接回 403 */
-#endif
-#if ENABLE_USER_FILTER
-static const char *USER_BLOCKLIST[] = { "192.0.2.1", NULL };   /* 用户过滤：名单内客户端 IP 不服务 */
-#endif
-#if ENABLE_REDIRECT
-static const char *REDIRECT_HOSTS[] = { "guide.test", NULL };  /* 网站引导：引到代理自制的页面 */
-#endif
+/* ---- 三张名单搬去了 rules.txt（值会变，所以做成运行时可重载的文件）。
+       默认名单：网站 127.0.0.1 / 用户 192.0.2.1 / 引导 guide.test → http://example.com/
+       文件读不到时 rules.c 里那三张内置默认名单顶上，行为与改造前一致。 ---- */
 
 /* ---- 自制页面：都带上可核对的标记串，报告里截图用 ---- */
 #if ENABLE_SITE_FILTER
@@ -51,9 +46,7 @@ static const char BODY_403_USER[] =
     "<p>你的来源 IP 在代理的用户过滤名单内，代理不为你服务。</p></body></html>";
 #endif
 #if ENABLE_REDIRECT
-static const char PAGE_GUIDE[] =
-    "<html><body><h1>实验一：网站引导</h1>"
-    "<p>你访问的域名被代理引导到了这个页面 —— 本页由代理服务器直接生成，没有访问原网站。</p></body></html>";
+/* 网站引导不再回自制页：命中名单就 302 跳到名单里写的目标网址，见 send_redirect() */
 #endif
 static const char BODY_400[] =
     "<html><body><h1>400 Bad Request</h1><p>请求报文畸形，无法解析。</p></body></html>";
@@ -83,23 +76,15 @@ void proxy_set_user_block(const char *ip) {
     mutex_unlock(g_threads_lock);
 }
 
-/* 名单查找：str 是否在表里（三个功能都关掉时这个函数没人用，用条件编译挡住警告） */
-#if ENABLE_SITE_FILTER || ENABLE_USER_FILTER || ENABLE_REDIRECT
-static int in_list(const char *const *list, const char *s) {
-    const char *const *p;
-    for (p = list; *p; p++) if (strcmp(*p, s) == 0) return 1;
-    return 0;
-}
-#endif
-
 #if ENABLE_USER_FILTER
-/* 用户过滤判据：对端 IP 是否在名单内（含自测注入值） */
+/* 用户过滤判据：对端 IP 是否在名单内（名单来自 rules.txt），再叠上自测的注入值。
+   rules_* 自己带锁，这里那把锁只护着注入值。 */
 static int user_blocked(const char *ip) {
-    int r;
+    int extra;
     mutex_lock(g_threads_lock);
-    r = in_list(USER_BLOCKLIST, ip) || (g_user_block_extra && strcmp(g_user_block_extra, ip) == 0);
+    extra = (g_user_block_extra && strcmp(g_user_block_extra, ip) == 0);
     mutex_unlock(g_threads_lock);
-    return r;
+    return rules_user_blocked(ip) || extra;
 }
 #endif
 
@@ -112,6 +97,19 @@ static void send_page(socket_t c, int code, const char *reason, const char *body
                      "Content-Length: %u\r\n"
                      "Connection: close\r\n\r\n%s",
                      code, reason, (unsigned)strlen(body), body);
+    if (n > 0 && (size_t)n < sizeof buf) net_send_full(c, buf, (size_t)n);
+}
+
+/* 网站引导命中时回 302 + Location（实验内容 c 项；目标网址来自 rules.txt 的 [redirect]）。
+   失败行为：发不出去就算了，调用方照常收尾。
+   注意 302 不带体，Content-Length: 0，所以客户端不需要等数据。 */
+static void send_redirect(socket_t c, const char *url) {
+    char buf[1024];
+    int n = snprintf(buf, sizeof buf,
+                     "HTTP/1.1 302 Found\r\n"
+                     "Location: %s\r\n"
+                     "Content-Length: 0\r\n"
+                     "Connection: close\r\n\r\n", url);
     if (n > 0 && (size_t)n < sizeof buf) net_send_full(c, buf, (size_t)n);
 }
 
@@ -169,6 +167,8 @@ static void handle_conn(socket_t c) {
     long        fwd_bytes = 0, cl;
     const char *ifs = NULL;
 
+    rules_reload_if_changed();      /* 名单热加载：名单文件存盘后，下一个请求就用新名单 */
+
     memset(&co, 0, sizeof co);
     memset(&acc, 0, sizeof acc);
     memset(&r, 0, sizeof r);
@@ -205,19 +205,22 @@ static void handle_conn(socket_t c) {
 
     /* 5. 网站过滤：命中就不连原服务器（报告里用"原服务器没接到连接"证明它生效） */
 #if ENABLE_SITE_FILTER
-    if (in_list(SITE_BLACKLIST, r.host)) {
+    if (rules_site_blocked(r.host)) {
         send_page(c, 403, "Forbidden", BODY_403_SITE);
         status = 403; strcpy(tag, "网站过滤");
         goto done;
     }
 #endif
 
-    /* 6. 网站引导：命中就回代理自制的页面 */
+    /* 6. 网站引导：命中名单就 302 跳到名单里写的目标网址 */
 #if ENABLE_REDIRECT
-    if (in_list(REDIRECT_HOSTS, r.host)) {
-        send_page(c, 200, "OK", PAGE_GUIDE);
-        status = 200; strcpy(tag, "网站引导");
-        goto done;
+    {
+        char dst[1024];
+        if (rules_redirect_target(r.host, dst, sizeof dst)) {
+            send_redirect(c, dst);
+            status = 302; strcpy(tag, "网站引导");
+            goto done;
+        }
     }
 #endif
 
@@ -292,8 +295,8 @@ static void handle_conn(socket_t c) {
     }
     status = rs.status;
 
-    /* 14. 收完 → 可缓存且攒全了才入库（部分响应不存） */
-    if (rs.cacheable && !acc.stop) {
+    /* 14. 收完 → 可缓存且攒全了才入库（部分响应不存；非 GET 的响应按 RFC 9111 §3 不进缓存） */
+    if (rs.cacheable && !acc.stop && strncasecmp(r.method, "GET", 3) == 0) {
         cache_put(r.target, hbuf, rheadlen, acc.p, acc.len, rs.last_modified);
         if (hit) strcpy(tag, "命中+200(已更新)");
     }
@@ -306,6 +309,10 @@ done:
     free(sbuf);
     free(acc.p);
     if (status != 0) log_line(peer, reqline, hostport, status, fwd_bytes, tag);
+
+    /* 收尾：把客户端还没读走的字节排空再关（worker 随后 sock_close(c)）。
+       缺这一步，拒绝类响应（403/503）会因为"带未读数据 close"触发 RST，客户端什么都收不到。 */
+    net_close_gracefully(c, 500);
 }
 
 /* 每个连接一个线程：跑完把并发计数减回去（参数是堆分配的，线程自己负责 free）。 */
@@ -321,10 +328,12 @@ static THREAD_FN(worker) {
     return 0;                     /* POSIX 侧返回 0 就是 NULL */
 }
 
-/* 主循环：accept → 判并发上限 → 开线程。阻塞函数，Ctrl-C 退出。 */
-void proxy_run(int port) {
+/* 主循环：accept → 判并发上限 → 开线程。阻塞函数，Ctrl-C 退出。
+   rules_path：名单文件路径（NULL 或读不到 → 用 rules.c 里的内置默认名单）。 */
+void proxy_run(int port, const char *rules_path) {
     socket_t ls;
 
+    rules_init(rules_path);
     cache_init();
     MUTEX_INIT(g_threads_lock);
     ls = net_listen(port);
@@ -333,6 +342,7 @@ void proxy_run(int port) {
         return;
     }
     fprintf(stderr, "HTTP 代理已启动：监听 %d（Ctrl-C 退出）\n", port);
+    fprintf(stderr, "名单来源：%s\n", rules_source());
 
     for (;;) {
         socket_t c = accept(ls, NULL, NULL);
@@ -347,6 +357,7 @@ void proxy_run(int port) {
         if (g_threads >= MAX_THREADS) {          /* 连接风暴：直接拒，不无限开线程 */
             mutex_unlock(g_threads_lock);
             send_page(c, 503, "Service Unavailable", BODY_503);
+            net_close_gracefully(c, 500);        /* 同样要排空再关，否则 503 会被 RST 吞掉 */
             sock_close(c);
             continue;
         }
@@ -370,16 +381,17 @@ void proxy_run(int port) {
 #ifndef SELFTEST_BUILD
 int main(int argc, char **argv) {
     int port = (argc > 1) ? atoi(argv[1]) : LISTEN_PORT;
+    const char *rules_path = (argc > 2) ? argv[2] : "rules.txt";   /* 名单文件，默认取当前目录的 rules.txt */
 
     if (port <= 0 || port > 65535) {
-        fprintf(stderr, "用法: %s [端口，默认 %d]\n", argv[0], LISTEN_PORT);
+        fprintf(stderr, "用法: %s [端口，默认 %d] [名单文件，默认 rules.txt]\n", argv[0], LISTEN_PORT);
         return 1;
     }
     if (plat_init() != 0) {                      /* Windows 上这一步是 WSAStartup */
         fprintf(stderr, "网络库初始化失败（errno=%d）\n", (int)sock_errno());
         return 1;
     }
-    proxy_run(port);
+    proxy_run(port, rules_path);
     plat_cleanup();
     return 0;
 }

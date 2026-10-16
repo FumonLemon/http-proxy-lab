@@ -6,13 +6,14 @@
 #include "../net.h"
 #include "../http.h"
 #include "../cache.h"
+#include "../rules.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* proxy.c 没有头文件（plan 第 2.1 节的文件清单），这两条由本文件自己声明 */
-void proxy_run(int port);
+void proxy_run(int port, const char *rules_path);
 void proxy_set_user_block(const char *ip);
 
 /* ---- 固定常量：端口不随机取，Windows 上少一段代码（plan 第 2.4 节） ---- */
@@ -163,7 +164,7 @@ static THREAD_FN(origin_thread) {
 /* 代理线程：proxy_run 是阻塞的主循环 */
 static THREAD_FN(proxy_thread) {
     (void)arg;
-    proxy_run(PROXY_PORT);
+    proxy_run(PROXY_PORT, NULL);      /* NULL = 用内置默认名单，不受仓库里的 rules.txt 影响 */
     return 0;
 }
 
@@ -335,14 +336,15 @@ static void t6_user_filter(void) {
     finish("T6 用户过滤（单机注入判据）");
 }
 
-/* T7 网站引导：被引导的域名拿到代理自制页面 */
+/* T7 网站引导：被引导的域名拿到 302 + Location（目标来自名单，原来是回一张写死的自制页） */
 static void t7_redirect(void) {
     int n0 = origin_conns();
     int b = proxy_get("http://guide.test/anything", buf2, sizeof buf2);
     int n1 = origin_conns();
-    expect(b > 0 && strstr(buf2, "实验一：网站引导") != NULL, "引导域名 → 代理自制的页面");
+    expect(b > 0 && strstr(buf2, "302") != NULL, "引导域名 → 302");
+    expect(b > 0 && strstr(buf2, "Location: http://example.com/") != NULL, "302 带上了名单里的目标网址");
     expect(n1 == n0, "没有连原服务器（引导在连原服务器之前完成）");
-    finish("T7 网站引导");
+    finish("T7 网站引导（302 跳转）");
 }
 
 /* T8 解析与畸形输入：解析断言 + 400/502 + 进程存活 */
@@ -388,6 +390,50 @@ static void t8_parse_and_bad(void) {
     finish("T8 请求解析与畸形输入");
 }
 
+/* T9 名单热加载：改名单文件，不重启进程就生效（plan 第 3.5 节）。
+   它换的是全局名单表，所以安排到最后跑，收尾时还原内置默认名单。 */
+static void t9_rules_reload(void) {
+    const char *p = "selftest_rules.txt";
+    char dst[512];
+    FILE *f;
+
+    f = fopen(p, "wb");
+    if (!f) { expect(0, "能写出测试用名单文件"); finish("T9 名单热加载"); return; }
+    fputs("# selftest 用\n"
+          "[site]\n"
+          "blocked.test\n"
+          "[user]\n"
+          "nobody.invalid\n"
+          "[redirect]\n"
+          "jump.test    http://first.test/\n", f);
+    fclose(f);
+
+    rules_init(p);
+    expect(rules_site_blocked("blocked.test") == 1, "文件里的网站名单生效");
+    expect(rules_site_blocked("BLOCKED.TEST") == 1, "主机名匹配不区分大小写");
+    expect(rules_user_blocked("nobody.invalid") == 1, "文件里的用户名单生效");
+    expect(rules_redirect_target("jump.test", dst, sizeof dst) == 1 &&
+           strcmp(dst, "http://first.test/") == 0, "引导目标取自文件");
+    expect(rules_site_blocked("keep.test") == 0, "没写进文件的主机不命中（对照）");
+
+    sleep_ms(1100);                       /* 等 mtime 走过去：粗粒度文件系统也够 */
+    f = fopen(p, "wb");
+    if (f) {
+        fputs("[site]\nkeep.test\n\n[redirect]\njump.test    http://second.test/\n", f);
+        fclose(f);
+    }
+    rules_reload_if_changed();            /* 这就是代理每个请求前调的那一句 */
+    expect(rules_site_blocked("keep.test") == 1 && rules_site_blocked("blocked.test") == 0,
+           "改文件后新条目生效、旧条目失效（进程没重启）");
+    expect(rules_redirect_target("jump.test", dst, sizeof dst) == 1 &&
+           strcmp(dst, "http://second.test/") == 0, "引导目标跟着文件一起改了");
+
+    remove(p);
+    rules_init(NULL);                     /* 还原内置默认名单，不影响别的用例 */
+    expect(rules_site_blocked("127.0.0.1") == 1, "还原内置默认名单（127.0.0.1 又命中）");
+    finish("T9 名单热加载（rules.txt）");
+}
+
 int main(void) {
     thread_t t;
 
@@ -413,6 +459,7 @@ int main(void) {
     t6_user_filter();
     t7_redirect();
     t8_parse_and_bad();
+    t9_rules_reload();
 
     printf("== %s %d/%d ==\n", g_fail ? "FAIL" : "PASS", g_pass, g_pass + g_fail);
     return g_fail ? 1 : 0;

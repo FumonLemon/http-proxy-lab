@@ -27,7 +27,7 @@ jobs:
         shell: pwsh
         # 把编译/自测的报错顶成 annotation：Actions 日志页要登录才能看，annotation 走公开 API 就能读
         run: |
-          $out = cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib 2>&1
+          $out = cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c rules.c proxy.c ws2_32.lib 2>&1
           $out | Out-Host
           if ($LASTEXITCODE -ne 0) {
             $out | Where-Object { $_ -match ': (error|warning) ' } | Select-Object -First 20 |
@@ -46,7 +46,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $out = cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib 2>&1
+          $out = cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c rules.c proxy.c ws2_32.lib 2>&1
           $out | Out-Host
           if ($LASTEXITCODE -ne 0) {
             $out | Where-Object { $_ -match ': (error|warning) ' } | Select-Object -First 20 |

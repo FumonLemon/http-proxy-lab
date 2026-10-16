@@ -39,6 +39,13 @@
   #define mutex_lock(m)   EnterCriticalSection(&(m))
   #define mutex_unlock(m) LeaveCriticalSection(&(m))
   #define THREAD_FN(name) unsigned __stdcall name(void *arg)
+  #define sock_shutdown_wr(s) shutdown((s), SD_SEND)
+
+  /* 给已连接的 socket 设接收超时（毫秒）：收尾排空对端数据时用，防止恶意客户端占住线程 */
+  static inline int sock_set_rcv_timeout(socket_t s, int ms) {
+      DWORD v = (DWORD)ms;
+      return setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&v, (int)sizeof v);
+  }
 
   /* WSAStartup：Windows 上必须先初始化库，失败返回 -1（错误码用 sock_errno()） */
   static inline int plat_init(void) { WSADATA w; return WSAStartup(MAKEWORD(2, 2), &w) == 0 ? 0 : -1; }
@@ -46,6 +53,18 @@
   static inline void sleep_ms(int ms) { Sleep((DWORD)ms); }
   static inline long long plat_now_ms(void) { return (long long)GetTickCount64(); }
   static inline void plat_localtime(struct tm *out, time_t t) { localtime_s(out, &t); }
+
+  /* 名单文件的最后修改时间（毫秒）：热加载用；取不到/文件不存在返回 0。
+     毫秒而不是秒：同一秒里连改两次也能分辨出来。用 Win32 原生 API 而不是 stat()，
+     免得 MSVC 的 POSIX 别名在 /W4 下报弃用警告。 */
+  static inline long long plat_file_mtime_ms(const char *path) {
+      WIN32_FILE_ATTRIBUTE_DATA d;
+      ULARGE_INTEGER u;
+      if (!GetFileAttributesExA(path, GetFileExInfoStandard, &d)) return 0;
+      u.HighPart = d.ftLastWriteTime.dwHighDateTime;
+      u.LowPart  = d.ftLastWriteTime.dwLowDateTime;
+      return (long long)(u.QuadPart / 10000ULL);         /* 100ns → 毫秒 */
+  }
 
   /* 非阻塞开关 + 等可写 + 读连接结果：只给 net_connect 的超时用 */
   static inline int sock_set_nonblock(socket_t s, int on) {
@@ -79,6 +98,7 @@
   #include <pthread.h>
   #include <errno.h>
   #include <fcntl.h>      /* fcntl：非阻塞 connect 用 */
+  #include <sys/stat.h>   /* stat：名单文件 mtime 用 */
 
   typedef int             socket_t;
   typedef socklen_t       sock_len_t;
@@ -100,6 +120,15 @@
   #define mutex_lock(m)   pthread_mutex_lock(&(m))
   #define mutex_unlock(m) pthread_mutex_unlock(&(m))
   #define THREAD_FN(name) void *name(void *arg)
+  #define sock_shutdown_wr(s) shutdown((s), SHUT_WR)
+
+  /* 给已连接的 socket 设接收超时（毫秒）：收尾排空对端数据时用，防止恶意客户端占住线程 */
+  static inline int sock_set_rcv_timeout(socket_t s, int ms) {
+      struct timeval tv;
+      tv.tv_sec  = ms / 1000;
+      tv.tv_usec = (ms % 1000) * 1000;
+      return setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, (socklen_t)sizeof tv);
+  }
 
   static inline int  plat_init(void) { return 0; }
   static inline void plat_cleanup(void) {}
@@ -117,6 +146,13 @@
       return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
   }
   static inline void plat_localtime(struct tm *out, time_t t) { localtime_r(&t, out); }
+
+  /* 名单文件的最后修改时间（毫秒）：热加载用；取不到/文件不存在返回 0 */
+  static inline long long plat_file_mtime_ms(const char *path) {
+      struct stat st;
+      if (stat(path, &st) != 0) return 0;
+      return (long long)st.st_mtime * 1000 + (long long)(st.st_mtim.tv_nsec / 1000000L);
+  }
 
   /* 非阻塞开关 + 等可写 + 读连接结果：只给 net_connect 的超时用 */
   static inline int sock_set_nonblock(socket_t s, int on) {

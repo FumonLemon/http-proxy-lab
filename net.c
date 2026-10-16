@@ -104,3 +104,19 @@ int net_peer_ip(socket_t s, char *out, size_t cap) {
     if (getpeername(s, (struct sockaddr *)&a, &alen) != 0) return -1;
     return INET_NTOP(AF_INET, &a.sin_addr, out, cap) ? 0 : -1;
 }
+
+/* 收尾：半关（发 FIN）后把对端还没读走的数据读掉再关，避免 RST 把最后一条响应吞掉。
+   总排空上限 256 KB：正常的"请求已读完再回话"路径这里立刻读到 EOF（客户端收到响应就关），
+   只有拒绝类响应才会真读到东西；上限是为了不让客户端拿长连接占着 worker。 */
+void net_close_gracefully(socket_t s, int timeout_ms) {
+    char   buf[1024];
+    size_t drained = 0;
+
+    if (sock_shutdown_wr(s) != 0) return;          /* 连接已经断了：没什么可收尾的 */
+    sock_set_rcv_timeout(s, timeout_ms);
+    while (drained < 256u * 1024u) {
+        int n = (int)recv(s, buf, SOCK_IO_LEN(sizeof buf), 0);
+        if (n <= 0) break;                         /* 0 = 对端关了；<0 = 超时/出错，都收工 */
+        drained += (size_t)n;
+    }
+}

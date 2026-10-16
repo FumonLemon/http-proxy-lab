@@ -7,15 +7,15 @@
 存进内存表，下次命中先发 `If-Modified-Since` 问原服务器（304 就用缓存应答）。链路上还插了网站过滤、
 用户过滤、网站引导三道判断。
 
-设计与取舍的完整依据在同目录的 `research.md` / `plan.md`（vault：苹果3号/已处理/手搓代理服务器/）。
+设计与取舍的完整依据在 vault 的 `已处理/手搓代理服务器/`：`research.md`（研究）与 `plan.md`（计划 + 实施记录）。
 
 ## 构建
 
-macOS / MinGW（`make` 三个目标）：
+macOS / MinGW（`make` 三个目标；Windows 侧 Makefile 会自动补上 `-lws2_32`）：
 
 ```
-make proxy        # 编译出代理可执行文件
-make check        # 编译并运行自测（8 条断言，全过退出码 0）
+make proxy        # 编译出代理可执行文件（Windows 上产出 proxy.exe）
+make check        # 编译并运行自测（9 组 / 47 条断言，全过退出码 0）
 make asan         # 带 AddressSanitizer + UBSan 再跑一遍自测（调试用，不进 CI）
 make clean
 ```
@@ -23,8 +23,8 @@ make clean
 MSVC（在仓库根目录、已进入 VS 开发者命令行）：
 
 ```
-cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c proxy.c ws2_32.lib
-cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c proxy.c ws2_32.lib
+cl /W4 /std:c11 /utf-8 /Fe:proxy.exe net.c http.c cache.c rules.c proxy.c ws2_32.lib
+cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selftest.c net.c http.c cache.c rules.c proxy.c ws2_32.lib
 selftest.exe
 ```
 
@@ -47,8 +47,31 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 [2026-10-11 15:19:30] 127.0.0.1 GET http://info.cern.ch/ HTTP/1.1 -> info.cern.ch:80 304 878 命中+304
 ```
 
-三个扩展功能的开关在 `proxy.c` 顶部（`ENABLE_SITE_FILTER` / `ENABLE_USER_FILTER` / `ENABLE_REDIRECT`），
-编译时可用 `-DENABLE_SITE_FILTER=0` 关掉做对照；三张名单也在 `proxy.c` 顶部硬编码。
+三个扩展功能的**编译期开关**在 `proxy.c` 顶部（`ENABLE_SITE_FILTER` / `ENABLE_USER_FILTER` / `ENABLE_REDIRECT`），
+编译时可用 `-DENABLE_SITE_FILTER=0` 关掉做对照；三张**名单本身**不在这里——见下一节。
+
+## 名单与热加载（rules.txt）
+
+三张名单是运行时可改的文本文件（`rules.txt`；命令行第二个参数可指定别的路径，例如
+`./proxy.exe 8080 rules.txt`；文件不存在就用内置默认名单，行为与硬编码时代一致）：
+
+```text
+[site]                          # 网站过滤：命中 → 403，代理不连原服务器
+127.0.0.1
+
+[user]                          # 用户过滤：来源 IP 命中 → 403
+192.0.2.1
+
+[redirect]                      # 网站引导：命中主机 → 302 + Location 跳到后面那个网址
+guide.test    http://example.com/
+```
+
+规则：`#` 是注释、`[小节]` 切名单、空行忽略；主机名匹配**不分大小写**，只比主机名
+（`http://127.0.0.1:9999/x` 命中 `127.0.0.1`，路径不参与匹配）；只对 `http://` 绝对形式请求有意义
+（https 走 `CONNECT`，在解析阶段就回 501）。
+
+**存盘即生效**：代理每处理一个请求前只 `stat` 一次名单文件的 mtime（毫秒级），变了才重读。
+所以改名单**不用重启、不用重新编译**；文件被删或读不动时保留上一次成功的名单。
 
 ## 进度
 
@@ -58,11 +81,14 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 - [x] B 多线程 + 线程上限 + 大响应/慢响应/引导
 - [x] C 缓存（If-Modified-Since + 304 + 淘汰）
 - [x] D 三个扩展功能 + 开关对照
+- [x] D2 名单热加载：`rules.txt` + mtime 轮询（存盘即生效）；网站引导改成真 302 跳转
 - [ ] E1/E2 宿舍 Windows 上人工验收（浏览器、系统代理、截图）——只有你能做
 - [ ] E3/E4 报告与打包
 
-自测当前状态：`make check` → `PASS 8/8`，`make asan` → `PASS 8/8`，
-`-Wall -Wextra -Wpedantic -Wconversion` 零警告（含各开关组合）。
+自测当前状态：`make check` → `PASS 9/9`（47 条断言），`make asan` → `PASS 9/9`，
+本机 MinGW gcc 15.2.0 下 `-Wall -Wextra -Wpedantic -Wconversion` 有两条已存在的提示
+（`platform.h` 的 `FIONBIO` 符号转换、`proxy.c:203` 的 `%s` 可能截断，`snprintf` 本身安全），
+CI 的 Apple clang 16 / MSVC 19.51 侧是零警告。
 
 CI 实测记录（报告"实验环境"可直接引用）：
 
@@ -73,7 +99,7 @@ CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selft
 本机编译器（macos-latest 同款）：Apple clang 16.0.0，make check 通过
 ```
 
-## 实测踩到的四个真问题（写报告可以直接引用）
+## 实测踩到的五个真问题（写报告可以直接引用）
 
 1. **一个地址被黑洞时会死等。** 首次实跑 `http://neverssl.com/`（本实验的经典纯 http 靶子）时，
    代理卡死、curl 15 秒拿不到任何字节。查明：该域名同时有 A 与 AAAA 记录，从本网络看
@@ -89,8 +115,13 @@ CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selft
 4. **MSVC 的 C 解析器不接受把调用约定宏塞进函数参数表。** `static inline int thread_start(thread_t *,
    THREAD_FN((*fn)), void *)` 在 MSVC 下报 `C2061/C2146/C2059`；改成
    `typedef unsigned (__stdcall *thread_fn_t)(void *)` 再写成普通参数即可，两平台共用。
+5. **拒绝类响应会被 RST 吞掉：带未读数据 `close` 是个陷阱。** 用户过滤的 403 是在"请求一个字节都
+   没读"时就回的，随后直接 `closesocket` 会让内核发 RST，客户端**连那条 403 都收不到**
+   （实测客户端 0 字节 + `WinError 10053`；同一份代码在"先读走请求再回"的网站过滤路径上就没有问题）。
+   修法：收尾时先 `shutdown(SD_SEND)` 发 FIN，再把对端还没读走的数据带超时地读掉（`net_close_gracefully`，
+   总排空上限 256 KB），之后才关；`handle_conn` 的收尾点与并发上限 503 那条路径共用这一个函数。
 
-前两个是平台无关的运行期 bug（自测与真实流量抓到），后两个只在 MSVC 上出现（CI 的 windows-latest 抓到）。
+前两个、第五个是平台无关的运行期 bug（自测与真实流量抓到），第三、第四个只在 MSVC 上出现（CI 的 windows-latest 抓到）。
 
 ## 已知局限（都写进报告的"局限"）
 
@@ -99,3 +130,6 @@ CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selft
 - 只缓存 GET + 状态码 200 + 带 `Last-Modified` + 无 `no-store` 的响应；不做 `Vary`、不做 `max-age/Expires` 新鲜度计算。
 - 缓存全表一把锁 + 线性扫描，上限 64 条 / 8 MB；只在内存里，重启即失。
 - 用户过滤的判据是本机来源 IP，单机只能验证逻辑（自测里用注入值演示），多机验证未做。
+- 名单只按**主机名**精确匹配（不分大小写）：不支持路径级过滤、通配、正则，也不按解析出的 IP 复核；
+  名单文件没有权限保护，本机任何进程都能改（控制面与数据面没隔离）。
+- 名单热加载靠文件 mtime（毫秒级），所以别在同一毫秒里连改两次；文件被删时保留上一次成功的名单。
