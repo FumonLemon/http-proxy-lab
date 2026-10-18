@@ -101,7 +101,7 @@ CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selft
 本机编译器（macos-latest 同款）：Apple clang 16.0.0，make check 通过
 ```
 
-## 实测踩到的五个真问题（写报告可以直接引用）
+## 实测踩到的六个真问题（写报告可以直接引用）
 
 1. **一个地址被黑洞时会死等。** 首次实跑 `http://neverssl.com/`（本实验的经典纯 http 靶子）时，
    代理卡死、curl 15 秒拿不到任何字节。查明：该域名同时有 A 与 AAAA 记录，从本网络看
@@ -122,8 +122,13 @@ CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selft
    （实测客户端 0 字节 + `WinError 10053`；同一份代码在"先读走请求再回"的网站过滤路径上就没有问题）。
    修法：收尾时先 `shutdown(SD_SEND)` 发 FIN，再把对端还没读走的数据带超时地读掉（`net_close_gracefully`，
    总排空上限 256 KB），之后才关；`handle_conn` 的收尾点与并发上限 503 那条路径共用这一个函数。
+6. **POSIX 的"亚秒 mtime"字段名不统一：macOS 不是 `st_mtim`。** 名单热加载要毫秒级 mtime
+   （不然同一秒内改两次会漏掉），Linux 写 `st.st_mtim.tv_nsec` 能编，到 macOS 上直接
+   `error: no member named 'st_mtim' in 'struct stat'`——BSD 那边叫 `st_mtimespec`。
+   修法：`#if defined(__APPLE__)` 分支取名，其余走 `st_mtim`；Windows 本来就用
+   `GetFileAttributesExA`，不受影响。这条是 CI 的 macos-latest 抓的，本机 MinGW 编不出来。
 
-前两个、第五个是平台无关的运行期 bug（自测与真实流量抓到），第三、第四个只在 MSVC 上出现（CI 的 windows-latest 抓到）。
+前两个、第五个是平台无关的运行期 bug（自测与真实流量抓到），第三、第四、第六个是平台/编译器差异（CI 的两个 job 抓到）。
 
 ## 已知局限（都写进报告的"局限"）
 
