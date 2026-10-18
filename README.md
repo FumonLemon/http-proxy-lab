@@ -56,15 +56,31 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 `127.0.0.1_9000_a.txt-8e1c84f1.bin`），内容是**响应头 + 响应体原文**（`head -5` 就能看到 `HTTP/1.1 200 OK`）。
 
 **删掉镜像文件就等于清缓存**：每次查缓存前会 `stat` 一下镜像，文件不在就把内存条目一并作废。
-课程验收的四步因此都能真演出来：
+课程验收的四步因此都能真演出来（用外网原服务器，不需要在本机起任何服务）：
 
 ```bash
-rm -f cache/*.bin && ls cache/                              # ① 空文件夹
-curl -x http://127.0.0.1:8080 http://127.0.0.1:9000/a.txt   # ② 日志"缓存未命中"，cache/ 多出文件
-head -5 cache/*.bin                                         #    镜像里就是响应报文原文
-curl -x http://127.0.0.1:8080 http://127.0.0.1:9000/a.txt   # ③ 日志"命中+304"
-rm -f cache/*.bin && curl 同一 URL                           # ④ 又变回"缓存未命中"
+# 任选一个外网纯 http 靶子（实测都能命中 304）
+U=http://mirrors.tuna.tsinghua.edu.cn/debian/README
+
+rm -f cache/*.bin && ls cache/            # ① 空文件夹
+curl -x http://127.0.0.1:8080 $U          # ② 日志"缓存未命中"，cache/ 多出 xxx.bin
+head -5 cache/*.bin                       #    镜像里就是响应报文原文
+curl -x http://127.0.0.1:8080 $U          # ③ 日志"命中+304"
+rm -f cache/*.bin && curl -x http://127.0.0.1:8080 $U      # ④ 又变回"缓存未命中"
 ```
+
+**哪些站能命中**（2026-10-18 实测，`200 未命中 → 304 命中+304`）：
+
+| 靶子 | 大小 | 首访耗时 |
+| --- | --- | --- |
+| `http://mirrors.tuna.tsinghua.edu.cn/debian/README` | 1198 B | ~3.1 s |
+| `http://mirrors.ustc.edu.cn/debian/README` | 1198 B | ~3.1 s |
+| `http://mirror.nju.edu.cn/debian/README` | 1198 B | ~3.1 s |
+| `http://info.cern.ch/` | 646 B | ~3.9 s |
+
+能命中的条件：① 纯 `http`（https 走 CONNECT，本代理回 501）；② 响应带 `Last-Modified`；③ 没有被
+`Cache-Control: no-store` 禁掉；④ 单条 ≤ 4 MB。首页通常没有 `Last-Modified`（如 `www.gnu.org`），
+所以优先挑**静态文件**（`README`、`.txt`、小图片）。
 
 ## 名单与热加载（rules.txt）
 
