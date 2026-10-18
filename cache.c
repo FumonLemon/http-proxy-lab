@@ -182,7 +182,7 @@ int cache_fetch(const char *url, cache_obj_t *out) {
         if (strcmp(q->url, url) != 0) continue;
 
         /* 镜像被删 ⇒ 条目作废：这样"删掉 cache/ 里的文件"就等于清缓存（plan §10.2）。
-           代价是每次命多多一次 stat（微秒级），换来的是验收时"删文件"这个动作真实有效。 */
+           代价是每次命中多一次 stat（微秒级），换来的是验收时"删文件"这个动作真实有效。 */
         if (!mirror_exists(url)) {
             if (prev) prev->next = q->next;
             else      g_head = q->next;
