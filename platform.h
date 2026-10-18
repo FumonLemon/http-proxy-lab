@@ -147,11 +147,16 @@
   }
   static inline void plat_localtime(struct tm *out, time_t t) { localtime_r(&t, out); }
 
-  /* 名单文件的最后修改时间（毫秒）：热加载用；取不到/文件不存在返回 0 */
+  /* 名单文件的最后修改时间（毫秒）：热加载用；取不到/文件不存在返回 0。
+     亚秒字段的名字各平台不统一：Linux 是 st_mtim，macOS/BSD 是 st_mtimespec。 */
   static inline long long plat_file_mtime_ms(const char *path) {
       struct stat st;
       if (stat(path, &st) != 0) return 0;
+  #if defined(__APPLE__)
+      return (long long)st.st_mtime * 1000 + (long long)(st.st_mtimespec.tv_nsec / 1000000L);
+  #else
       return (long long)st.st_mtime * 1000 + (long long)(st.st_mtim.tv_nsec / 1000000L);
+  #endif
   }
 
   /* 非阻塞开关 + 等可写 + 读连接结果：只给 net_connect 的超时用 */
