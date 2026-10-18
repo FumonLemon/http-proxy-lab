@@ -310,6 +310,13 @@ static void t4_cache(void) {
         cache_put("http://t/too-big", "H\r\n", 3, tiny, 5u * 1024u * 1024u, LM);
     }
     expect(cache_count() == CACHE_MAX_ENTRIES, "单条 5 MB（超 4 MB 上限）不落表");
+
+    /* 收尾：这 70 条只是拿来测上限的，别把镜像文件留在 cache/ 里 */
+    for (i = 0; i < 70; i++) {
+        char u[64], p[512];
+        snprintf(u, sizeof u, "http://t/%d", i);
+        if (cache_mirror_path(u, p, sizeof p) == 0) remove(p);
+    }
     printf("      缓存当前 %d 条 / %u 字节\n", cache_count(), (unsigned)cache_bytes());
     finish("T4 缓存（If-Modified-Since → 304 → 用缓存应答 + 上限）");
 }
@@ -452,6 +459,42 @@ static void t9_rules_reload(void) {
     finish("T9 名单热加载（rules.txt）");
 }
 
+/* T10 缓存镜像：磁盘上留一份对象副本；删掉文件 ⇒ 条目作废（plan §10） */
+static void t10_cache_mirror(void) {
+    const char *url  = "http://selftest.invalid/mirror-check";
+    const char *head = "HTTP/1.1 200 OK\nContent-Length: 5\n\n";
+    const char *body = "hello";
+    const char *lm   = "Wed, 29 Jun 2022 00:23:33 GMT";
+    char p[512], buf[64];
+    cache_obj_t o;
+    FILE *f;
+    size_t n = 0;
+    int opened;
+
+    memset(&o, 0, sizeof o);
+    cache_put(url, head, strlen(head), body, strlen(body), lm);
+    expect(cache_mirror_path(url, p, sizeof p) == 0, "能算出镜像文件路径");
+
+    f = fopen(p, "rb");
+    opened = (f != NULL);
+    if (f) { n = fread(buf, 1, sizeof buf - 1, f); buf[n] = '\0'; fclose(f); }
+    expect(opened && n == strlen(head) + strlen(body), "镜像文件出现，长度 = 响应头 + 响应体");
+    expect(opened && strncmp(buf, "HTTP/1.1 200 OK", 15) == 0, "镜像内容是响应报文原文（开头就是状态行）");
+
+    remove(p);
+    memset(&o, 0, sizeof o);
+    expect(cache_fetch(url, &o) == 0, "删掉镜像文件后条目作废（当未命中）");
+    cache_obj_free(&o);
+
+    cache_put(url, head, strlen(head), body, strlen(body), lm);
+    memset(&o, 0, sizeof o);
+    expect(cache_fetch(url, &o) == 1, "重新入库后又命中（镜像也回来了）");
+    cache_obj_free(&o);
+
+    remove(p);                                     /* 收尾：别把测试文件留在 cache/ 里 */
+    finish("T10 缓存镜像（删文件即清缓存）");
+}
+
 int main(void) {
     thread_t t;
 
@@ -478,6 +521,7 @@ int main(void) {
     t7_redirect();
     t8_parse_and_bad();
     t9_rules_reload();
+    t10_cache_mirror();
 
     printf("== %s %d/%d ==\n", g_fail ? "FAIL" : "PASS", g_pass, g_pass + g_fail);
     return g_fail ? 1 : 0;

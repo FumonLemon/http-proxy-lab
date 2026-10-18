@@ -16,6 +16,7 @@
   #include <ws2tcpip.h>      /* getaddrinfo / inet_ntop */
   #include <windows.h>       /* Sleep / CRITICAL_SECTION / GetTickCount64 */
   #include <process.h>       /* _beginthreadex */
+  #include <direct.h>        /* _mkdir：缓存镜像目录 */
 
   typedef SOCKET           socket_t;
   typedef int              sock_len_t;
@@ -65,6 +66,9 @@
       u.LowPart  = d.ftLastWriteTime.dwLowDateTime;
       return (long long)(u.QuadPart / 10000ULL);         /* 100ns → 毫秒 */
   }
+
+  /* 建目录（幂等：已存在不算错）。缓存镜像目录用。 */
+  static inline int plat_mkdir(const char *path) { return _mkdir(path); }
 
   /* 非阻塞开关 + 等可写 + 读连接结果：只给 net_connect 的超时用 */
   static inline int sock_set_nonblock(socket_t s, int on) {
@@ -158,6 +162,9 @@
       return (long long)st.st_mtime * 1000 + (long long)(st.st_mtim.tv_nsec / 1000000L);
   #endif
   }
+
+  /* 建目录（幂等：已存在不算错）。缓存镜像目录用。 */
+  static inline int plat_mkdir(const char *path) { return mkdir(path, 0755); }
 
   /* 非阻塞开关 + 等可写 + 读连接结果：只给 net_connect 的超时用 */
   static inline int sock_set_nonblock(socket_t s, int on) {

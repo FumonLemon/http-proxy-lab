@@ -15,7 +15,7 @@ macOS / MinGW（`make` 三个目标；Windows 侧 Makefile 会自动补上 `-lws
 
 ```
 make proxy        # 编译出代理可执行文件（Windows 上产出 proxy.exe）
-make check        # 编译并运行自测（9 组 / 49 条断言，全过退出码 0）
+make check        # 编译并运行自测（10 组 / 54 条断言，全过退出码 0）
 make asan         # 带 AddressSanitizer + UBSan 再跑一遍自测（调试用，不进 CI）
 make clean
 ```
@@ -49,6 +49,22 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 
 三个扩展功能的**编译期开关**在 `proxy.c` 顶部（`ENABLE_SITE_FILTER` / `ENABLE_USER_FILTER` / `ENABLE_REDIRECT`），
 编译时可用 `-DENABLE_SITE_FILTER=0` 关掉做对照；三张**名单本身**不在这里——见下一节。
+
+## 缓存落盘与验收（cache/）
+
+内存表只是索引，对象本体镜像到工作目录下的 `cache/`：文件名 = URL 可读名 + 8 位 hash（如
+`127.0.0.1_9000_a.txt-8e1c84f1.bin`），内容是**响应头 + 响应体原文**（`head -5` 就能看到 `HTTP/1.1 200 OK`）。
+
+**删掉镜像文件就等于清缓存**：每次查缓存前会 `stat` 一下镜像，文件不在就把内存条目一并作废。
+课程验收的四步因此都能真演出来：
+
+```bash
+rm -f cache/*.bin && ls cache/                              # ① 空文件夹
+curl -x http://127.0.0.1:8080 http://127.0.0.1:9000/a.txt   # ② 日志"缓存未命中"，cache/ 多出文件
+head -5 cache/*.bin                                         #    镜像里就是响应报文原文
+curl -x http://127.0.0.1:8080 http://127.0.0.1:9000/a.txt   # ③ 日志"命中+304"
+rm -f cache/*.bin && curl 同一 URL                           # ④ 又变回"缓存未命中"
+```
 
 ## 名单与热加载（rules.txt）
 
@@ -84,10 +100,11 @@ old.test      http://example.com/   #   ② 网址 → 302 跳过去（地址栏
 - [x] C 缓存（If-Modified-Since + 304 + 淘汰）
 - [x] D 三个扩展功能 + 开关对照
 - [x] D2 名单热加载：`rules.txt` + mtime 轮询（存盘即生效）；网站引导改成真 302 跳转
+- [x] D3 缓存落盘镜像：`cache/` 里留对象副本，删镜像文件即失效（对齐课程验收动作）
 - [ ] E1/E2 宿舍 Windows 上人工验收（浏览器、系统代理、截图）——只有你能做
 - [ ] E3/E4 报告与打包
 
-自测当前状态：`make check` → `PASS 9/9`（49 条断言），`make asan` → `PASS 9/9`，
+自测当前状态：`make check` → `PASS 10/10`（54 条断言），`make asan` → `PASS 10/10`，
 本机 MinGW gcc 15.2.0 下 `-Wall -Wextra -Wpedantic -Wconversion` 有两条已存在的提示
 （`platform.h` 的 `FIONBIO` 符号转换、`proxy.c:203` 的 `%s` 可能截断，`snprintf` 本身安全），
 CI 的 Apple clang 16 / MSVC 19.51 侧是零警告。
@@ -135,7 +152,7 @@ CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selft
 - 不实现 `CONNECT`，所以 https 站点经本代理一律打不开（回 501）；验证只用纯 http 靶子。
 - 转发时强制 `Connection: close`，换掉帧界定（读到 EOF = 一条响应读完），代价是没有连接复用。
 - 只缓存 GET + 状态码 200 + 带 `Last-Modified` + 无 `no-store` 的响应；不做 `Vary`、不做 `max-age/Expires` 新鲜度计算。
-- 缓存全表一把锁 + 线性扫描，上限 64 条 / 8 MB；只在内存里，重启即失。
+- 缓存全表一把锁 + 线性扫描，上限 64 条 / 8 MB；内存是索引、对象镜像在 `cache/`（删镜像即失效），重启后索引清空。
 - 用户过滤的判据是本机来源 IP，单机只能验证逻辑（自测里用注入值演示），多机验证未做。
 - 名单只按**主机名**精确匹配（不分大小写）：不支持路径级过滤、通配、正则，也不按解析出的 IP 复核；
   名单文件没有权限保护，本机任何进程都能改（控制面与数据面没隔离）。

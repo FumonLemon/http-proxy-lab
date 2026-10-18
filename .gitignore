@@ -10,3 +10,4 @@ selftest_*
 build/
 *.log
 .DS_Store
+cache/

@@ -8,6 +8,10 @@
 #define CACHE_MAX_ENTRIES 64                    /* 条目数上限 */
 #define CACHE_MAX_BYTES   (8u * 1024u * 1024u)  /* 总字节上限 8 MB */
 #define CACHEABLE_MAX     (4u * 1024u * 1024u)  /* 单条超过它不进缓存，只转发 */
+#define CACHE_DIR         "cache"                /* 磁盘镜像目录（内存是索引，这里是对象本体） */
+
+/* 算出某个 URL 对应的镜像文件路径：cache/<可读名>-<8位hex>.bin。0 = 成功（自测用） */
+int cache_mirror_path(const char *url, char *out, size_t cap);
 
 typedef struct {
     char  *head;      /* 响应头原文（含空行），原样回放 */
