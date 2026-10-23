@@ -403,6 +403,23 @@ static void t8_parse_and_bad(void) {
     expect(n > 0 && strstr(fwd, "If-Modified-Since: Wed, 29 Jun 2022 00:23:33 GMT\r\n") != NULL,
            "命中缓存时带上了 If-Modified-Since");
 
+    {
+        /* 客户端自带的条件头必须被剥掉：否则原站回 304
+           而代理没有副本可回放（实测故障：Edge 带 If-None-Match
+           → 连打 "304 196 缓存未命中"） */
+        const char *hc = "GET http://example.com/cond HTTP/1.1\r\n"
+                         "Host: example.com\r\n"
+                         "If-Modified-Since: Wed, 29 Jun 2022 00:23:33 GMT\r\n"
+                         "If-None-Match: \"abc\"\r\n"
+                         "\r\n";
+        expect(http_parse_request(hc, strlen(hc), &r) == 0, "带客户端条件头的请求能解析");
+        n = http_build_forward(&r, NULL, fwd, sizeof fwd);
+        expect(n > 0 && strstr(fwd, "If-Modified-Since") == NULL,
+               "客户端自带的 If-Modified-Since 被剥掉");
+        expect(n > 0 && strstr(fwd, "If-None-Match") == NULL,
+               "客户端自带的 If-None-Match 被剥掉");
+    }
+
     b = proxy_raw("BREAK\r\n\r\n", buf2, sizeof buf2);
     expect(b >= 0, "畸形请求行没有让代理崩");
     expect(b == 0 || strstr(buf2, "400") != NULL, "畸形请求行 → 400 或直接关连接");

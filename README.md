@@ -15,7 +15,7 @@ macOS / MinGW（`make` 三个目标；Windows 侧 Makefile 会自动补上 `-lws
 
 ```
 make proxy        # 编译出代理可执行文件（Windows 上产出 proxy.exe）
-make check        # 编译并运行自测（10 组 / 54 条断言，全过退出码 0）
+make check        # 编译并运行自测（10 组 / 57 条断言，全过退出码 0）
 make asan         # 带 AddressSanitizer + UBSan 再跑一遍自测（调试用，不进 CI）
 make clean
 ```
@@ -124,7 +124,7 @@ old.test      http://example.com/   #   ② 网址 → 302 跳过去（地址栏
 - [ ] E1/E2 宿舍 Windows 上人工验收（浏览器、系统代理、截图）——只有你能做
 - [ ] E3/E4 报告与打包
 
-自测当前状态：`make check` → `PASS 10/10`（54 条断言），`make asan` → `PASS 10/10`，
+自测当前状态：`make check` → `PASS 10/10`（57 条断言），`make asan` → `PASS 10/10`，
 本机 MinGW gcc 15.2.0 下 `-Wall -Wextra -Wpedantic -Wconversion` 有两条已存在的提示
 （`platform.h` 的 `FIONBIO` 符号转换、`proxy.c:203` 的 `%s` 可能截断，`snprintf` 本身安全），
 CI 的 Apple clang 16 / MSVC 19.51 侧是零警告。
