@@ -228,7 +228,20 @@ static void handle_conn(socket_t c) {
     /* 1. 取客户端 IP —— 用户过滤的判据 */
     net_peer_ip(c, peer, sizeof peer);
 
-    /* 2. 用户过滤 */
+    /* 2. 收完整请求头（循环 recv 直到读到空行，不假设一次 recv 就是一条报文） */
+    got = http_read_head(c, hbuf, HDR_MAX, &headlen);
+    if (got == -2) { send_page(c, 400, "Bad Request", BODY_400); status = 400; goto done; }
+    if (got <= 0) goto done;                    /* 对端直接关了：无事可做，不打日志 */
+
+    /* 3. 解析请求行与头部 */
+    pr = http_parse_request(hbuf, (size_t)got, &r);
+    if (pr == -2) { send_page(c, 501, "Not Implemented", BODY_501); status = 501; goto done; }
+    if (pr != 0)  { send_page(c, 400, "Bad Request", BODY_400);     status = 400; goto done; }
+    snprintf(reqline, sizeof reqline, "%s %s %s", r.method, r.target, r.version);
+    snprintf(hostport, sizeof hostport, "%s:%d", r.host, r.port);
+
+    /* 4. 用户过滤：判据是来源 IP。放在解析之后，日志才能同时写出"谁"和"他想访问什么"；
+       早于解析则只能记一个 IP，验收时看不出被拦的是哪次请求。 */
 #if ENABLE_USER_FILTER
     if (user_blocked(peer)) {
         send_page(c, 403, "Forbidden", BODY_403_USER);
@@ -236,18 +249,6 @@ static void handle_conn(socket_t c) {
         goto done;
     }
 #endif
-
-    /* 3. 收完整请求头（循环读到 \r\n\r\n，不假设一次 recv 就是一条报文） */
-    got = http_read_head(c, hbuf, HDR_MAX, &headlen);
-    if (got == -2) { send_page(c, 400, "Bad Request", BODY_400); status = 400; goto done; }
-    if (got <= 0) goto done;                    /* 对端直接关了：无事可做，不打日志 */
-
-    /* 4. 解析请求行与头部 */
-    pr = http_parse_request(hbuf, (size_t)got, &r);
-    if (pr == -2) { send_page(c, 501, "Not Implemented", BODY_501); status = 501; goto done; }
-    if (pr != 0)  { send_page(c, 400, "Bad Request", BODY_400);     status = 400; goto done; }
-    snprintf(reqline, sizeof reqline, "%s %s %s", r.method, r.target, r.version);
-    snprintf(hostport, sizeof hostport, "%s:%d", r.host, r.port);
 
     /* 5. 网站过滤：命中就不连原服务器（报告里用"原服务器没接到连接"证明它生效） */
 #if ENABLE_SITE_FILTER
