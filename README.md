@@ -37,14 +37,15 @@ selftest.exe
 
 ```
 ./proxy 8080                                             # 端口默认 8080，可省略
+./proxy 8080 rules.txt --hide 501                        # 不打印 501（Edge 后台的 https 握手会刷屏）
 curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏览器也可以：设 http 代理为 127.0.0.1:8080）
 ```
 
-日志走 stderr，一行一条请求，字段固定：
+日志走 stderr，一行一条请求，字段固定（命中时末尾多一段 `IMS=…`，即真正发出去的条件请求值）：
 
 ```
 [2026-10-11 15:19:29] 127.0.0.1 GET http://info.cern.ch/ HTTP/1.1 -> info.cern.ch:80 200 878 缓存未命中
-[2026-10-11 15:19:30] 127.0.0.1 GET http://info.cern.ch/ HTTP/1.1 -> info.cern.ch:80 304 878 命中+304
+[2026-10-11 15:19:30] 127.0.0.1 GET http://info.cern.ch/ HTTP/1.1 -> info.cern.ch:80 304 878 命中+304 IMS=Wed, 05 Feb 2014 16:00:31 GMT
 ```
 
 三个扩展功能的**编译期开关**在 `proxy.c` 顶部（`ENABLE_SITE_FILTER` / `ENABLE_USER_FILTER` / `ENABLE_REDIRECT`），
@@ -52,7 +53,8 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 
 ## 缓存落盘与验收（cache/）
 
-> 完整的验收流程——每一步的原理、报文、实测输出，以及 gdb 断点怎么打——见 **[`缓存验收手册.md`](缓存验收手册.md)**。
+> 完整的验收流程——每一步的原理、报文、实测输出，以及 gdb 断点怎么打——见 vault 里的
+> `新地/已处理/手搓代理服务器/缓存验收手册.md`（仓库里那份已删）。
 
 内存表只是索引，对象本体镜像到工作目录下的 `cache/`：文件名 = URL 可读名 + 8 位 hash（如
 `127.0.0.1_9000_a.txt-8e1c84f1.bin`），内容是**响应头 + 响应体原文**（`head -5` 就能看到 `HTTP/1.1 200 OK`）。

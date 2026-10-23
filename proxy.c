@@ -150,17 +150,25 @@ static int send_local_file(socket_t c, const char *path) {
 
 #endif /* ENABLE_REDIRECT */
 
+/* 日志过滤：--hide <状态码> 时该状态码不打印（默认 0 = 全打）。
+   Edge 在后台会建几十个 https 连接，每个都是 CONNECT → 501，日志被刷屏；
+   加这个开关只是不写日志，代码路径一条没少。 */
+static int g_hide_status = 0;
+
 /* 日志一行到 stderr（协议数据只走 socket，日志绝不许混进客户端字节流）。
-   字段固定：时间 客户端IP:端口 请求行 目标host:端口 状态码 转发字节数 缓存标记 */
+   字段固定：时间 客户端IP:端口 请求行 目标host:端口 状态码 转发字节数 缓存标记 [附加信息] */
 static void log_line(const char *peer, const char *reqline, const char *hostport,
-                     int status, long bytes, const char *tag) {
+                     int status, long bytes, const char *tag, const char *extra) {
     time_t t = time(NULL);
     struct tm tm;
     char ts[32];
 
+    if (g_hide_status && status == g_hide_status) return;
+
     plat_localtime(&tm, t);
     strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
-    fprintf(stderr, "[%s] %s %s -> %s %d %ld %s\n", ts, peer, reqline, hostport, status, bytes, tag);
+    fprintf(stderr, "[%s] %s %s -> %s %d %ld %s%s\n", ts, peer, reqline, hostport,
+            status, bytes, tag, extra ? extra : "");
     fflush(stderr);      /* 日志重定向到文件时 stderr 会被缓冲，不刷就看不到实时输出 */
 }
 
@@ -194,6 +202,7 @@ static void acc_add(acc_t *a, const void *d, size_t n) {
 static void handle_conn(socket_t c) {
     char       *hbuf = NULL, *fwd_buf = NULL, *sbuf = NULL;
     char        peer[64] = "?", hostport[300] = "-", reqline[600] = "-", tag[24] = "-";
+    char        extra[96] = "";      /* 命中时填 IMS=<值>，附在日志行末，验收时能直接看到条件请求 */
     socket_t    u = SOCK_INVALID;
     http_req_t  r;
     http_resp_t rs;
@@ -274,7 +283,10 @@ static void handle_conn(socket_t c) {
 
     /* 7. 查缓存（键 = 浏览器发来的完整 URL） */
     hit = cache_fetch(r.target, &co);
-    if (hit) ifs = co.last_modified;            /* 命中就带条件请求去问原服务器 */
+    if (hit) {
+        ifs = co.last_modified;                 /* 命中就带条件请求去问原服务器 */
+        snprintf(extra, sizeof extra, " IMS=%s", co.last_modified);   /* 让日志直接显示发出去的是哪条条件 */
+    }
     strcpy(tag, hit ? "缓存命中" : "缓存未命中");
 
     /* 8. 连原服务器 */
@@ -356,7 +368,7 @@ done:
     free(fwd_buf);
     free(sbuf);
     free(acc.p);
-    if (status != 0) log_line(peer, reqline, hostport, status, fwd_bytes, tag);
+    if (status != 0) log_line(peer, reqline, hostport, status, fwd_bytes, tag, extra);
 
     /* 收尾：把客户端还没读走的字节排空再关（worker 随后 sock_close(c)）。
        缺这一步，拒绝类响应（403/503）会因为"带未读数据 close"触发 RST，客户端什么都收不到。 */
@@ -430,9 +442,16 @@ void proxy_run(int port, const char *rules_path) {
 int main(int argc, char **argv) {
     int port = (argc > 1) ? atoi(argv[1]) : LISTEN_PORT;
     const char *rules_path = (argc > 2) ? argv[2] : "rules.txt";   /* 名单文件，默认取当前目录的 rules.txt */
+    int i;
+
+    for (i = 3; i < argc; i++) {                 /* 可选开关：--hide <状态码> */
+        if (strcmp(argv[i], "--hide") == 0 && i + 1 < argc) g_hide_status = atoi(argv[++i]);
+    }
 
     if (port <= 0 || port > 65535) {
-        fprintf(stderr, "用法: %s [端口，默认 %d] [名单文件，默认 rules.txt]\n", argv[0], LISTEN_PORT);
+        fprintf(stderr, "用法: %s [端口，默认 %d] [名单文件，默认 rules.txt] [--hide <状态码>]\n",
+                argv[0], LISTEN_PORT);
+        fprintf(stderr, "  --hide 501   不打印 501（Edge 后台的 https 握手会刷屏）\n");
         return 1;
     }
     if (plat_init() != 0) {                      /* Windows 上这一步是 WSAStartup */
