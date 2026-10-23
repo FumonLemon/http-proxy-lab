@@ -157,17 +157,27 @@ int http_build_forward(const http_req_t *r, const char *ifs, char *out, size_t c
     if (n < 0 || (size_t)n >= cap) return -1;
     o = (size_t)n;
 
-    /* 原样搬运其余头字段，只删掉 Connection（下面统一补 close） */
+    /* 原样搬运其余头字段，剔除三类：
+         1) Connection —— 下面统一补 close；
+         2) If-Modified-Since / If-None-Match —— 这是**浏览器自己缓存**的条件请求头。
+            不剥掉就转发，原站会回 304，而代理手里根本没有副本可回放，
+            结果这条响应永远进不了缓存（实测：Edge 访问自己缓存过的站点，三次全是
+            "304 196 缓存未命中"）。代理自己的条件请求在下面单独插入。 */
     while (p + 1 < hlen && !(h[p] == '\r' && h[p + 1] == '\n')) p++;
     p = (p + 1 < hlen) ? p + 2 : hlen;
     while (p < hlen) {
-        size_t e = p;
+        size_t e = p, rest;
+        int skip = 0;
         while (e + 1 < hlen && !(h[e] == '\r' && h[e + 1] == '\n')) e++;
         if (e == p) break;                                  /* 头部结束 */
-        if (!(e - p >= 11 && strncasecmp(h + p, "Connection", 10) == 0 && h[p + 10] == ':')) {
-            if (o + (e - p) + 2 >= cap) return -1;
-            memcpy(out + o, h + p, e - p);
-            o += e - p;
+        rest = e - p;
+        if (rest >= 11 && strncasecmp(h + p, "Connection", 10) == 0 && h[p + 10] == ':') skip = 1;
+        else if (rest >= 18 && strncasecmp(h + p, "If-Modified-Since", 17) == 0 && h[p + 17] == ':') skip = 1;
+        else if (rest >= 13 && strncasecmp(h + p, "If-None-Match", 12) == 0 && h[p + 12] == ':') skip = 1;
+        if (!skip) {
+            if (o + rest + 2 >= cap) return -1;
+            memcpy(out + o, h + p, rest);
+            o += rest;
             out[o++] = '\r'; out[o++] = '\n';
         }
         p = e + 2;
