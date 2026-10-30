@@ -174,6 +174,9 @@ int http_build_forward(const http_req_t *r, const char *ifs, char *out, size_t c
         if (rest >= 11 && strncasecmp(h + p, "Connection", 10) == 0 && h[p + 10] == ':') skip = 1;
         else if (rest >= 18 && strncasecmp(h + p, "If-Modified-Since", 17) == 0 && h[p + 17] == ':') skip = 1;
         else if (rest >= 13 && strncasecmp(h + p, "If-None-Match", 13) == 0 && h[p + 13] == ':') skip = 1;
+        /* 代理认证凭据绝不能发给原服务器：只给本代理看，转发前删掉 */
+        else if (rest >= 20 && strncasecmp(h + p, "Proxy-Authorization", 19) == 0 && h[p + 19] == ':') skip = 1;
+        else if (rest >= 16 && strncasecmp(h + p, "Proxy-Connection", 16) == 0) skip = 1;
         if (!skip) {
             if (o + rest + 2 >= cap) return -1;
             memcpy(out + o, h + p, rest);

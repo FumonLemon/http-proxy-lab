@@ -3,6 +3,7 @@
    文件读不到 → 内置默认名单（等于改造前的行为）；运行中被删/读不动 → 保留上一次成功的名单。 */
 #include "rules.h"
 #include "platform.h"
+#include "http.h"          /* 只是借 http_find_header 找 Proxy-Authorization 头 */
 
 #include <ctype.h>
 #include <stdio.h>
@@ -12,14 +13,31 @@
 #define RULES_MAX_FILE  65536        /* 名单文件大小上限（字节），够大；超了当畸形 */
 #define RULES_MAX_ITEMS 256          /* 每张名单的条数上限 */
 #define RULES_PATH_MAX  512
+#define AUTH_LIMIT      8            /* 认证用户数上限（够演示；多了该换哈希表） */
+#define AUTH_USER_MAX   32
+#define AUTH_PASS_MAX   64
+#define AUTH_DENY_MAX   4            /* 每个用户最多禁几台主机 */
+#define AUTH_HOST_MAX   128
 
 typedef struct { char *host; char *target; } redir_t;
+
+/* 一个认证用户：用户名 / 密码 / 被禁访问的主机（0～AUTH_DENY_MAX 个） */
+typedef struct {
+    char user[AUTH_USER_MAX];
+    char pass[AUTH_PASS_MAX];
+    char deny[AUTH_DENY_MAX][AUTH_HOST_MAX];
+    int  deny_n;
+} auth_t;
 
 typedef struct {
     char   **site;  int site_n;
     char   **user;  int user_n;
     redir_t *redir; int redir_n;
+    auth_t  *auth;  int auth_n;
 } lists_t;
+
+/* 解析一行 [auth]（实现在下面）：parse_lines 先用，故前置声明 */
+static int auth_add(lists_t *L, const char *line, size_t len);
 
 /* ponytail: 一把锁护住全部名单读写；名单就几十条、匹配是字符串比较，锁竞争可忽略。
    真要上量再换读写锁 + 哈希索引。 */
@@ -57,7 +75,7 @@ static void lists_free(lists_t *L) {
     for (i = 0; i < L->site_n; i++) free(L->site[i]);
     for (i = 0; i < L->user_n; i++) free(L->user[i]);
     for (i = 0; i < L->redir_n; i++) { free(L->redir[i].host); free(L->redir[i].target); }
-    free(L->site); free(L->user); free(L->redir);
+    free(L->site); free(L->user); free(L->redir); free(L->auth);
     memset(L, 0, sizeof *L);
 }
 
@@ -97,8 +115,9 @@ static int redir_add(lists_t *L, const char *host, size_t hl, const char *url, s
     return 1;
 }
 
-/* 逐行解析：空行与 '#' 注释跳过；[site] / [user] / [redirect] 切名单；
-   [redirect] 每行两个字段（主机 + 目标网址），只写了一个字段的行忽略。 */
+/* 逐行解析：空行与 '#' 注释跳过；[site] / [user] / [redirect] / [auth] 切名单；
+   [redirect] 每行两个字段（主机 + 目标网址），只写了一个字段的行忽略；
+   [auth] 每行 user:pass[:deny=host,host]，格式不对的行忽略。 */
 static int parse_lines(const char *buf, size_t len, lists_t *L) {
     size_t i = 0;
     int sec = 0;                                   /* 0 = 不在任何小节里（该段内容全忽略） */
@@ -118,6 +137,7 @@ static int parse_lines(const char *buf, size_t len, lists_t *L) {
                 if (section_is(buf + a, e - a, "[site]"))          sec = 1;
                 else if (section_is(buf + a, e - a, "[user]"))     sec = 2;
                 else if (section_is(buf + a, e - a, "[redirect]")) sec = 3;
+                else if (section_is(buf + a, e - a, "[auth]"))     sec = 4;
                 else sec = 0;
             } else if (sec == 1) {
                 if (!list_add(&L->site, &L->site_n, buf + a, e - a)) return 0;
@@ -131,6 +151,8 @@ static int parse_lines(const char *buf, size_t len, lists_t *L) {
                 if (b > a && u < e) {
                     if (!redir_add(L, buf + a, b - a, buf + u, e - u)) return 0;
                 }
+            } else if (sec == 4) {
+                if (!auth_add(L, buf + a, e - a)) return 0;
             }
         }
         i = (j < len) ? j + 1 : len;
@@ -188,6 +210,155 @@ static void load_defaults_locked(void) {
     g_mtime = 0;                                   /* 没从文件读到过：文件后来出现了也能被拾起 */
     snprintf(g_src, sizeof g_src, "内置默认名单（%d 网站 / %d 用户 / %d 引导）",
              g_lists.site_n, g_lists.user_n, g_lists.redir_n);
+}
+
+/* ---- 代理认证（实验内容 3 的"用户过滤"按账号实现）----
+   [auth] 段一行一个用户：user:pass            → 该用户无限制
+                          user:pass:deny=a.com,b.com → 该用户被禁止访问这些主机
+   客户端按 RFC 7235 发 Proxy-Authorization: Basic base64(user:pass)。
+   没有 [auth] 段 = 不启用认证，其余功能完全不受影响。 */
+
+static int b64_val(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+/* base64 解码：in[0..n) → out（自动补 0 结尾）。返回解码字节数，-1 = 非法输入。 */
+static int b64_decode(const char *in, size_t n, char *out, size_t cap) {
+    size_t i, o = 0;
+    int quad[4], q = 0;
+
+    if (n == 0 || cap == 0) return -1;
+    for (i = 0; i < n; i++) {
+        int c = (unsigned char)in[i], v;
+        if (c == '=') break;                     /* padding：后面没有数据了 */
+        v = b64_val(c);
+        if (v < 0) return -1;                    /* 非法字符（含空格）→ 当凭据格式错 */
+        quad[q++] = v;
+        if (q == 4) {
+            if (o + 3 >= cap) return -1;
+            out[o++] = (char)((quad[0] << 2) | (quad[1] >> 4));
+            out[o++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+            out[o++] = (char)(((quad[2] & 3) << 6) | quad[3]);
+            q = 0;
+        }
+    }
+    if (q == 2) {
+        if (o + 1 >= cap) return -1;
+        out[o++] = (char)((quad[0] << 2) | (quad[1] >> 4));
+    } else if (q == 3) {
+        if (o + 2 >= cap) return -1;
+        out[o++] = (char)((quad[0] << 2) | (quad[1] >> 4));
+        out[o++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+    } else if (q != 0) {
+        return -1;                               /* 只有一个字符：不可能是合法 base64 */
+    }
+    out[o] = 0;
+    return (int)o;
+}
+
+/* 解析一行 [auth]：成功或"这行不算"都返回 1，只有内存不足返回 0（让整份名单作废）。 */
+static int auth_add(lists_t *L, const char *line, size_t len) {
+    const char *end = line + len;
+    const char *c1, *c2;
+    size_t ul, pl;
+    auth_t *na;
+
+    if (L->auth_n >= AUTH_LIMIT) return 1;
+    c1 = memchr(line, ':', len);
+    if (!c1) return 1;                                   /* 没有冒号：跳过 */
+    c2 = memchr(c1 + 1, ':', (size_t)(end - c1 - 1));
+    ul = (size_t)(c1 - line);
+    pl = c2 ? (size_t)(c2 - c1 - 1) : (size_t)(end - c1 - 1);
+    if (ul == 0 || ul >= AUTH_USER_MAX || pl == 0 || pl >= AUTH_PASS_MAX) return 1;
+
+    na = realloc(L->auth, sizeof(auth_t) * (size_t)(L->auth_n + 1));
+    if (!na) return 0;
+    L->auth = na;
+    memset(&na[L->auth_n], 0, sizeof na[L->auth_n]);
+    memcpy(na[L->auth_n].user, line, ul);
+    memcpy(na[L->auth_n].pass, c1 + 1, pl);
+    na[L->auth_n].user[ul] = 0;
+    na[L->auth_n].pass[pl] = 0;
+
+    if (c2) {                                            /* 可选字段 deny=host1,host2 */
+        const char *d = c2 + 1;
+        if ((size_t)(end - d) > 5 && strncasecmp(d, "deny=", 5) == 0) {
+            d += 5;
+            while (d < end && L->auth[L->auth_n].deny_n < AUTH_DENY_MAX) {
+                const char *comma = memchr(d, ',', (size_t)(end - d));
+                size_t hl = comma ? (size_t)(comma - d) : (size_t)(end - d);
+                if (hl > 0 && hl < AUTH_HOST_MAX) {
+                    memcpy(L->auth[L->auth_n].deny[L->auth[L->auth_n].deny_n], d, hl);
+                    L->auth[L->auth_n].deny_n++;
+                }
+                if (!comma) break;
+                d = comma + 1;
+            }
+        }
+    }
+    L->auth_n++;
+    return 1;
+}
+
+/* 认证 + 授权。返回值见 rules.h。凭据只在内存里比对，绝不转发给上游。 */
+int rules_auth_check(const char *head, size_t len, const char *host,
+                     char *user_out, size_t cap) {
+    const char *v;
+    size_t vl = 0;
+    char b64buf[256];
+    char user[AUTH_USER_MAX], pass[AUTH_PASS_MAX];
+    const char *colon;
+    int i, r = 1, enabled;
+
+    if (user_out && cap) user_out[0] = 0;
+
+    mutex_lock(g_lock);
+    enabled = g_lists.auth_n > 0;
+    mutex_unlock(g_lock);
+    if (!enabled) return 0;                       /* 没配 [auth]：不启用认证 */
+
+    v = http_find_header(head, len, "Proxy-Authorization", &vl);
+    if (!v) return 1;                             /* 没带凭据 → 407 */
+    while (vl && (*v == ' ' || *v == '\t')) { v++; vl--; }
+    if (vl < 7 || strncasecmp(v, "Basic ", 6) != 0) return 1;
+    v += 6;
+    vl -= 6;
+    while (vl && (*v == ' ' || *v == '\t')) { v++; vl--; }
+    if (b64_decode(v, vl, b64buf, sizeof b64buf) <= 0) return 1;
+
+    colon = strchr(b64buf, ':');
+    if (!colon || (size_t)(colon - b64buf) >= sizeof user) return 1;
+    snprintf(user, sizeof user, "%.*s", (int)(colon - b64buf), b64buf);
+    snprintf(pass, sizeof pass, "%s", colon + 1);
+
+    mutex_lock(g_lock);
+    for (i = 0; i < g_lists.auth_n; i++) {
+        if (strcmp(g_lists.auth[i].user, user) != 0) continue;
+        if (strcmp(g_lists.auth[i].pass, pass) != 0) break;   /* 用户名对但密码错 → 仍需认证 */
+        r = 0;
+        {
+            int k;
+            for (k = 0; k < g_lists.auth[i].deny_n; k++)
+                if (ci_equal(g_lists.auth[i].deny[k], host)) r = 2;
+        }
+        if (user_out && cap) snprintf(user_out, cap, "%s", g_lists.auth[i].user);
+        break;
+    }
+    mutex_unlock(g_lock);
+    return r;
+}
+
+int rules_auth_count(void) {
+    int n;
+    mutex_lock(g_lock);
+    n = g_lists.auth_n;
+    mutex_unlock(g_lock);
+    return n;
 }
 
 static int strlist_has(char **v, int n, const char *s) {

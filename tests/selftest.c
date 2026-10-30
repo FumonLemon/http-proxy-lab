@@ -512,6 +512,47 @@ static void t10_cache_mirror(void) {
     finish("T10 缓存镜像（删文件即清缓存）");
 }
 
+/* T11 代理认证（[auth] 段）：没凭据/密码错 → 407；对 → 放行；按用户禁访 → 403 */
+static void t11_proxy_auth(void) {
+    const char *p = "selftest_auth.txt";
+    const char *h_none = "GET http://ok.test/a HTTP/1.1\r\nHost: ok.test\r\n\r\n";
+    const char *h_bad  = "GET http://ok.test/a HTTP/1.1\r\nHost: ok.test\r\n"
+                         "Proxy-Authorization: Basic YWxpY2U6d3Jvbmc=\r\n\r\n";
+    const char *h_alice = "GET http://ok.test/a HTTP/1.1\r\nHost: ok.test\r\n"
+                          "Proxy-Authorization: Basic YWxpY2U6MTIzNA==\r\n\r\n";
+    const char *h_bob  = "GET http://ok.test/a HTTP/1.1\r\nHost: ok.test\r\n"
+                         "Proxy-Authorization: Basic Ym9iOjEyMzQ=\r\n\r\n";
+    char user[32];
+    FILE *f;
+
+    f = fopen(p, "wb");
+    if (!f) { expect(0, "能写出认证名单文件"); finish("T11 代理认证"); return; }
+    fputs("# selftest 认证\n[auth]\nalice:1234\nbob:1234:deny=blocked.test\n", f);
+    fclose(f);
+
+    rules_init(p);
+    expect(rules_auth_count() == 2, "名单里解析出 2 个认证用户");
+
+    expect(rules_auth_check(h_none, strlen(h_none), "ok.test", user, sizeof user) == 1,
+           "没带 Proxy-Authorization → 需要认证（407）");
+    expect(rules_auth_check(h_bad, strlen(h_bad), "ok.test", user, sizeof user) == 1,
+           "密码错误 → 仍需认证（407）");
+    expect(rules_auth_check(h_alice, strlen(h_alice), "ok.test", user, sizeof user) == 0 &&
+           strcmp(user, "alice") == 0, "alice 正确凭据 → 放行并带出用户名");
+    expect(rules_auth_check(h_alice, strlen(h_alice), "blocked.test", user, sizeof user) == 0,
+           "alice 没有禁访名单 → 哪个站都放行");
+    expect(rules_auth_check(h_bob, strlen(h_bob), "blocked.test", user, sizeof user) == 2,
+           "bob 访问被禁站点 → 403（用户过滤）");
+    expect(rules_auth_check(h_bob, strlen(h_bob), "other.test", user, sizeof user) == 0,
+           "bob 访问别的站 → 放行");
+
+    remove(p);
+    rules_init(NULL);
+    expect(rules_auth_check(h_alice, strlen(h_alice), "ok.test", user, sizeof user) == 0,
+           "没有 [auth] 段时认证关闭（老行为不变）");
+    finish("T11 代理认证（407 / 凭据校验 / 按用户禁访）");
+}
+
 int main(void) {
     thread_t t;
 
@@ -539,6 +580,7 @@ int main(void) {
     t8_parse_and_bad();
     t9_rules_reload();
     t10_cache_mirror();
+    t11_proxy_auth();
 
     printf("== %s %d/%d ==\n", g_fail ? "FAIL" : "PASS", g_pass, g_pass + g_fail);
     return g_fail ? 1 : 0;

@@ -48,8 +48,15 @@
       return setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&v, (int)sizeof v);
   }
 
-  /* WSAStartup：Windows 上必须先初始化库，失败返回 -1（错误码用 sock_errno()） */
-  static inline int plat_init(void) { WSADATA w; return WSAStartup(MAKEWORD(2, 2), &w) == 0 ? 0 : -1; }
+  /* WSAStartup + 控制台编码：Windows 上必须先初始化库，失败返回 -1（错误码用 sock_errno()）。
+     控制台默认是 936(GBK)，而源码里的中文按 UTF-8 字节写出 → 乱码，所以这里把双向都设成 UTF-8。
+     输出被重定向到文件时这两句无副作用（文件里本来就是 UTF-8）。 */
+  static inline int plat_init(void) {
+      WSADATA w;
+      SetConsoleOutputCP(CP_UTF8);
+      SetConsoleCP(CP_UTF8);
+      return WSAStartup(MAKEWORD(2, 2), &w) == 0 ? 0 : -1;
+  }
   static inline void plat_cleanup(void) { WSACleanup(); }
   static inline void sleep_ms(int ms) { Sleep((DWORD)ms); }
   static inline long long plat_now_ms(void) { return (long long)GetTickCount64(); }

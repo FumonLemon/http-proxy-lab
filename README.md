@@ -15,7 +15,7 @@ macOS / MinGW（`make` 三个目标；Windows 侧 Makefile 会自动补上 `-lws
 
 ```
 make proxy        # 编译出代理可执行文件（Windows 上产出 proxy.exe）
-make check        # 编译并运行自测（10 组 / 57 条断言，全过退出码 0）
+make check        # 编译并运行自测（11 组 / 65 条断言，全过退出码 0）
 make asan         # 带 AddressSanitizer + UBSan 再跑一遍自测（调试用，不进 CI）
 make clean
 ```
@@ -50,6 +50,30 @@ curl -v -x http://127.0.0.1:8080 http://info.cern.ch/    # 命令行验证（浏
 
 三个扩展功能的**编译期开关**在 `proxy.c` 顶部（`ENABLE_SITE_FILTER` / `ENABLE_USER_FILTER` / `ENABLE_REDIRECT`），
 编译时可用 `-DENABLE_SITE_FILTER=0` 关掉做对照；三张**名单本身**不在这里——见下一节。
+
+## 代理认证（[auth] 段）
+
+这是「按账号的用户过滤」，与 `[user]` 段的「按来源 IP 拦截」是两层，互不影响。`rules.txt` 里一行一个用户：
+
+```
+[auth]
+alice:1234                       # 该用户不受限
+bob:1234:deny=example.com        # 该用户被禁访问 example.com（可逗号列多个）
+```
+
+- 只要 `[auth]` 段有一行生效 → 所有请求都必须带凭据，否则回 `407` + `Proxy-Authenticate: Basic realm="netlab"`
+  （浏览器收到 407 会自动弹认证框，填完自动重发）
+- 凭据格式 `Proxy-Authorization: Basic base64(用户名:密码)`；**转发前被剥掉，绝不会发给原服务器**
+- 认证与授权判定都在**查缓存之前**：受限用户拿不到别人缓存的副本
+- 没有 `[auth]` 段 = 不启用认证，原有行为完全不变（自测里专门断言了这一点）
+
+```
+curl -i -x http://127.0.0.1:8080 http://info.cern.ch/                        # 407
+curl    --proxy-user alice:1234 -x http://127.0.0.1:8080 http://info.cern.ch/  # 200
+curl    --proxy-user bob:1234   -x http://127.0.0.1:8080 http://example.com/   # 403 用户过滤
+```
+
+密码明文存放、Basic 只是 base64 —— **仅用于实验演示**；真实系统必须 TLS + 摘要认证或令牌。
 
 ## 缓存落盘与验收（cache/）
 
@@ -124,7 +148,7 @@ old.test      http://example.com/   #   ② 网址 → 302 跳过去（地址栏
 - [ ] E1/E2 宿舍 Windows 上人工验收（浏览器、系统代理、截图）——只有你能做
 - [ ] E3/E4 报告与打包
 
-自测当前状态：`make check` → `PASS 10/10`（57 条断言），`make asan` → `PASS 10/10`，
+自测当前状态：`make check` → `PASS 11/11`（65 条断言），`make asan` → `PASS 11/11`，
 本机 MinGW gcc 15.2.0 下 `-Wall -Wextra -Wpedantic -Wconversion` 有两条已存在的提示
 （`platform.h` 的 `FIONBIO` 符号转换、`proxy.c:203` 的 `%s` 可能截断，`snprintf` 本身安全），
 CI 的 Apple clang 16 / MSVC 19.51 侧是零警告。
@@ -175,7 +199,8 @@ CI 命令：cl /W4 /std:c11 /utf-8 /DSELFTEST_BUILD /Fe:selftest.exe tests\selft
 - 缓存全表一把锁 + 线性扫描，上限 64 条 / 8 MB；内存是索引、对象镜像在 `cache/`（删镜像即失效），重启后索引清空。
 - 转发前会剥掉客户端自带的 `If-Modified-Since` / `If-None-Match`：那是浏览器对它自己缓存的条件，
   原样转发只会拿到一个代理无法回放的 304（表现为连打 `304 … 缓存未命中`）。条件请求统一由代理发。
-- 用户过滤的判据是本机来源 IP，单机只能验证逻辑（自测里用注入值演示），多机验证未做。
+- 用户过滤有两层：`[user]` 按来源 IP（单机只能验证逻辑，演示用回环第二地址 127.0.0.2）；
+  `[auth]` 按账号 + 密码（407 认证），但密码明文、Basic 仅 base64，无 TLS、无防爆破、无会话。
 - 名单只按**主机名**精确匹配（不分大小写）：不支持路径级过滤、通配、正则，也不按解析出的 IP 复核；
   名单文件没有权限保护，本机任何进程都能改（控制面与数据面没隔离）。
 - 名单热加载靠文件 mtime（毫秒级），所以别在同一毫秒里连改两次；文件被删时保留上一次成功的名单。

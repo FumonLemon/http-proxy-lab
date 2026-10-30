@@ -29,6 +29,10 @@
 #ifndef ENABLE_REDIRECT
 #define ENABLE_REDIRECT 1
 #endif
+/* 代理认证（按账号的用户过滤）：[auth] 段非空才生效，空则等于关闭 */
+#ifndef ENABLE_USER_AUTH
+#define ENABLE_USER_AUTH 1
+#endif
 
 /* ---- 三张名单搬去了 rules.txt（值会变，所以做成运行时可重载的文件）。
        默认名单：网站 127.0.0.1 / 用户 192.0.2.1 / 引导 guide.test → http://example.com/
@@ -99,6 +103,28 @@ static void send_page(socket_t c, int code, const char *reason, const char *body
                      code, reason, (unsigned)strlen(body), body);
     if (n > 0 && (size_t)n < sizeof buf) net_send_full(c, buf, (size_t)n);
 }
+
+#if ENABLE_USER_AUTH
+/* 407：要求客户端带凭据。必须带 Proxy-Authenticate，否则浏览器不知道该怎么认证。
+   CRLF 用数组写（13/10），省得再跟转义符较劲。 */
+static const char CRLF407[] = { 13, 10, 0 };
+
+static void send_407(socket_t c) {
+    static const char body[] =
+        "<html><body><h1>407 Proxy Authentication Required</h1>"
+        "<p>本代理要求认证：请在弹出框里输入用户名与密码。</p></body></html>";
+    char buf[768];
+    int n = snprintf(buf, sizeof buf,
+                     "HTTP/1.1 407 Proxy Authentication Required%s"
+                     "Proxy-Authenticate: Basic realm=%cnetlab%c%s"
+                     "Content-Type: text/html; charset=utf-8%s"
+                     "Content-Length: %u%s"
+                     "Connection: close%s%s",
+                     CRLF407, 34, 34, CRLF407, CRLF407,
+                     (unsigned)strlen(body), CRLF407, CRLF407, body);
+    if (n > 0 && (size_t)n < sizeof buf) net_send_full(c, buf, (size_t)n);
+}
+#endif
 
 /* ---- 网站引导的两种落地方式（目标写在 rules.txt 的 [redirect] 里）----
    目标以 http:// 开头   → 302 + Location 跳过去，但浏览器地址栏会变成目标网址；
@@ -250,6 +276,28 @@ static void handle_conn(socket_t c) {
     }
 #endif
 
+#if ENABLE_USER_AUTH
+    /* 4b. 代理认证（按账号）：[auth] 段非空才生效。
+       没凭据/凭据不对 → 407（浏览器据此弹认证框）；凭据对但该用户被禁此站 → 403。
+       必须在查缓存之前做完：否则受限用户可能拿到别人缓存的副本。 */
+    {
+        char auth_user[32] = "";
+        int ar = rules_auth_check(hbuf, (size_t)got, r.host, auth_user, sizeof auth_user);
+        if (ar == 1) {
+            send_407(c);
+            status = 407; strcpy(tag, "需认证");
+            goto done;
+        }
+        if (ar == 2) {
+            send_page(c, 403, "Forbidden", BODY_403_USER);
+            status = 403; strcpy(tag, "用户过滤");
+            snprintf(extra, sizeof extra, " USER=%s", auth_user);
+            goto done;
+        }
+        if (auth_user[0]) snprintf(extra, sizeof extra, " USER=%s", auth_user);
+    }
+#endif
+
     /* 5. 网站过滤：命中就不连原服务器（报告里用"原服务器没接到连接"证明它生效） */
 #if ENABLE_SITE_FILTER
     if (rules_site_blocked(r.host)) {
@@ -286,7 +334,7 @@ static void handle_conn(socket_t c) {
     hit = cache_fetch(r.target, &co);
     if (hit) {
         ifs = co.last_modified;                 /* 命中就带条件请求去问原服务器 */
-        snprintf(extra, sizeof extra, " IMS=%s", co.last_modified);   /* 让日志直接显示发出去的是哪条条件 */
+        snprintf(extra + strlen(extra), sizeof extra - strlen(extra), " IMS=%s", co.last_modified);
     }
     strcpy(tag, hit ? "缓存命中" : "缓存未命中");
 
@@ -360,6 +408,10 @@ static void handle_conn(socket_t c) {
     if (rs.cacheable && !acc.stop && strncasecmp(r.method, "GET", 3) == 0) {
         cache_put(r.target, hbuf, rheadlen, acc.p, acc.len, rs.last_modified);
         if (hit) strcpy(tag, "命中+200(已更新)");
+    } else if (!hit && rs.status == 200 && !rs.cacheable) {
+        /* 200 但没有 Last-Modified（或带 no-store）：按 RFC 9111 §3 本来就不许存，
+           永远不会有命中。日志里说清楚，免得看着"未命中"以为缓存坏了。 */
+        strcpy(tag, "不可缓存(无LM)");
     }
 
 done:
