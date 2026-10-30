@@ -186,8 +186,16 @@ static int load_file_locked(void) {
     lists_free(&g_lists);
     g_lists = L;                                   /* 先建好新表再换指针：读者看不到半截名单 */
     g_mtime = plat_file_mtime_ms(g_path);
-    snprintf(g_src, sizeof g_src, "%s（%d 网站 / %d 用户 / %d 引导）",
-             g_path, g_lists.site_n, g_lists.user_n, g_lists.redir_n);
+    {
+        int n = snprintf(g_src, sizeof g_src, "%s（%d 网站 / %d 用户 / %d 引导",
+                         g_path, g_lists.site_n, g_lists.user_n, g_lists.redir_n);
+        if (n > 0 && (size_t)n < sizeof g_src) {
+            if (g_lists.auth_n > 0)
+                snprintf(g_src + n, sizeof g_src - (size_t)n, " / 认证 %d 个账号）", g_lists.auth_n);
+            else
+                snprintf(g_src + n, sizeof g_src - (size_t)n, " / 认证关闭）");
+        }
+    }
     return 1;
 }
 
@@ -208,7 +216,7 @@ static void load_defaults_locked(void) {
     lists_free(&g_lists);
     g_lists = L;
     g_mtime = 0;                                   /* 没从文件读到过：文件后来出现了也能被拾起 */
-    snprintf(g_src, sizeof g_src, "内置默认名单（%d 网站 / %d 用户 / %d 引导）",
+    snprintf(g_src, sizeof g_src, "内置默认名单（%d 网站 / %d 用户 / %d 引导 / 认证关闭）",
              g_lists.site_n, g_lists.user_n, g_lists.redir_n);
 }
 
